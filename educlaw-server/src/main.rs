@@ -17,6 +17,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use crate::auth::AuthConfig;
 use crate::db::schema::init_db;
+use crate::session::broker::SessionBroker;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,13 +50,19 @@ async fn main() -> anyhow::Result<()> {
 
     let claw_bin = std::env::var("CLAW_BIN").unwrap_or_else(|_| "claw".to_string());
 
-    let state = api::AppState::new(pool, auth_config, workspace_root, plugin_path, claw_bin);
+    let broker = SessionBroker::new();
+
+    let web_root = std::env::var("EDUCLAW_WEB_ROOT")
+        .unwrap_or_else(|_| "./educlaw-web".to_string());
+
+    let state = api::AppState::new(pool, auth_config, workspace_root, plugin_path, claw_bin, broker);
 
     let app = Router::new()
         .merge(api::routes())
         .with_state(state)
         .layer(tower_http::cors::CorsLayer::permissive())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .fallback_service(tower_http::services::ServeDir::new(&web_root));
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string())

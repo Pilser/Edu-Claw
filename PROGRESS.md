@@ -29,12 +29,12 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 2.1 | Session broker: spawn, register, lookup | ⬜ Pending | Currently inline in `api/sessions.rs` |
-| 2.2 | Idle watchdog Tokio task | ⬜ Pending | Stub in `session/watchdog.rs` |
-| 2.3 | Graceful teardown: SIGTERM → umount → DB update | ✅ Partial | `DELETE /sessions/:id` does this; watchdog not yet wired |
-| 2.4 | `last_input_at` tracking | ✅ Partial | DB column exists + `touch_last_input()`; not called from WS yet |
+| 2.1 | Session broker: spawn, register, lookup | ✅ Done | `session/broker.rs` — `Arc<SessionBroker>` in AppState; per-session `SessionEntry` with `last_input_at` Arc + `pty_tx` Option |
+| 2.2 | Idle watchdog Tokio task | ✅ Done | `session/watchdog.rs` — `run_watchdog` with 30s poll, warn at T-60s, terminate at T; spawned in `api/sessions.rs` |
+| 2.3 | Graceful teardown: SIGTERM → umount → DB update | ✅ Done | `DELETE /sessions/:id` + watchdog both call `remove_entry` + `umount_overlay` + set_session_state "ended" |
+| 2.4 | `last_input_at` tracking | ✅ Done | `pty_bridge.rs` updates `Arc<AtomicU64>` on every keypress; broker holds the Arc; watchdog reads it lock-free |
 | 2.5 | Resize event: TIOCSWINSZ from WS JSON | ✅ Done | `pty_bridge.rs` — `ClientMessage::Resize` |
-| 2.6 | xterm.js browser UI (split-panel layout) | ⬜ Pending | `educlaw-web/` not started |
+| 2.6 | xterm.js browser UI (split-panel layout) | ✅ Done | `educlaw-web/` — `index.html`, `terminal.js`, `api.js`, `style.css`; served via `tower-http ServeDir` |
 
 ---
 

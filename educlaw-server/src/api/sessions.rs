@@ -4,6 +4,10 @@
 // GET    /sessions/:id    — get session status
 // DELETE /sessions/:id    — terminate session (SIGTERM + umount)
 
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
