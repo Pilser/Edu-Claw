@@ -1,0 +1,159 @@
+// educlaw-server/src/api/sessions.rs
+//
+// POST   /sessions        — create and initialise a student session
+// GET    /sessions/:id    — get session status
+// DELETE /sessions/:id    — terminate session (SIGTERM + umount)
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{delete, get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::db::sessions::{self as db_sess, Session};
+use crate::db::students;
+use crate::error::{AppError, Result};
+use crate::session::{
+    dirs::SessionDirs,
+    namespace::{install_plugin, mount_overlay, umount_overlay},
+};
+
+use super::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/sessions", post(create_session))
+        .route("/sessions/:id", get(get_session))
+        .route("/sessions/:id", delete(terminate_session))
+}
+
+// ── Create session ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateSessionRequest {
+    student_id: String,
+    course: String,
+    assignment: Option<String>,
+    model: Option<String>,
+    /// Extra env vars to forward into the session (e.g. API keys).
+    api_keys: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Serialize)]
+struct CreateSessionResponse {
+    session_id: String,
+    ws_url: String,
+    token: String,
+}
+
+async fn create_session(
+    State(state): State<AppState>,
+    Json(body): Json<CreateSessionRequest>,
+) -> Result<impl IntoResponse> {
+    let student = students::get_student(&state.pool, &body.student_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("student {} not found", body.student_id)))?;
+
+    let session_id = Uuid::new_v4().to_string();
+    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
+
+    // Prepare filesystem layout
+    dirs.create_all()
+        .map_err(|e| AppError::Session(format!("failed to create session dirs: {e}")))?;
+
+    // Per-session plugin copy (init.sh will write settings.json into config/)
+    install_plugin(&state.plugin_path, &dirs.plugin)
+        .map_err(|e| AppError::Session(format!("failed to install plugin: {e}")))?;
+
+    // Mount OverlayFS
+    mount_overlay(&dirs).await?;
+
+    // Parse student class_ids for JWT
+    let class_ids: Vec<String> =
+        serde_json::from_str(&student.class_ids).unwrap_or_default();
+
+    // Persist session record
+    let session = Session {
+        id: session_id.clone(),
+        student_id: student.id.clone(),
+        course: body.course.clone(),
+        assignment: body.assignment.clone(),
+        state: "active".to_string(),
+        namespace_pid: None,
+        overlay_mount: dirs.merged.display().to_string(),
+        last_input_at: None,
+        started_at: String::new(), // set by DB DEFAULT
+        ended_at: None,
+    };
+    db_sess::insert_session(&state.pool, &session).await?;
+
+    // Session-scoped JWT for the WebSocket handshake
+    let token = state.auth.sign_session_token(
+        &student.id,
+        &student.role,
+        class_ids,
+        &session_id,
+    )?;
+
+    // Update student last_seen (non-fatal)
+    let _ = students::touch_last_seen(&state.pool, &student.id).await;
+
+    tracing::info!(
+        session_id = %session_id,
+        student    = %student.display_name,
+        course     = %body.course,
+        "session created"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateSessionResponse {
+            session_id: session_id.clone(),
+            ws_url: format!("/sessions/{session_id}/ws"),
+            token,
+        }),
+    ))
+}
+
+// ── Get session ───────────────────────────────────────────────────────────
+
+async fn get_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let session = db_sess::get_session(&state.pool, &session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
+    Ok(Json(session))
+}
+
+// ── Terminate session ─────────────────────────────────────────────────────
+
+async fn terminate_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let session = db_sess::get_session(&state.pool, &session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id} not found")))?;
+
+    // SIGTERM the namespace init process
+    if let Some(pid) = session.namespace_pid {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+    }
+
+    // Best-effort overlay unmount
+    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
+    umount_overlay(&dirs.merged).await;
+
+    db_sess::set_session_state(&state.pool, &session_id, "ended").await?;
+
+    tracing::info!(session_id = %session_id, "session terminated");
+    Ok(StatusCode::NO_CONTENT)
+}

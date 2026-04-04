@@ -1,0 +1,5 @@
+target/
+.claw/sessions/
+claw
+aut.txt
+claw-code-parity/

@@ -1,0 +1,14 @@
+{
+  "name": "educlaw",
+  "version": "0.1.0",
+  "description": "EduClaw student context plugin: injects per-student system prompt and connects the educlaw-mcp context server",
+  "permissions": ["read", "write", "execute"],
+  "defaultEnabled": true,
+  "lifecycle": {
+    "Init": ["./hooks/init.sh"],
+    "Shutdown": ["./hooks/shutdown.sh"]
+  },
+  "hooks": {
+    "PreToolUse": ["./hooks/pre_tool_use.sh"]
+  }
+}
