@@ -18,8 +18,10 @@ use crate::db::sessions::{self as db_sess, Session};
 use crate::db::students;
 use crate::error::{AppError, Result};
 use crate::session::{
+    broker::now_secs,
     dirs::SessionDirs,
     namespace::{install_plugin, mount_overlay, umount_overlay},
+    watchdog::{run_watchdog, WatchdogConfig},
 };
 
 use super::AppState;
@@ -91,6 +93,24 @@ async fn create_session(
     };
     db_sess::insert_session(&state.pool, &session).await?;
 
+    // Create broker entry + spawn idle watchdog
+    let last_input_at = Arc::new(AtomicU64::new(now_secs()));
+    state.broker.create_entry(&session_id, Arc::clone(&last_input_at)).await;
+    let idle_secs: u64 = std::env::var("IDLE_TIMEOUT_S")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(900);
+    let warn_secs: u64 = std::env::var("WARN_BEFORE_S")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+    tokio::spawn(run_watchdog(
+        WatchdogConfig {
+            session_id: session_id.clone(),
+            overlay_mount: dirs.merged.clone(),
+            idle_timeout: Duration::from_secs(idle_secs),
+            warn_before:  Duration::from_secs(warn_secs),
+        },
+        Arc::clone(&state.broker),
+        state.pool.clone(),
+    ));
+
     // Session-scoped JWT for the WebSocket handshake
     let token = state.auth.sign_session_token(
         &student.id,
@@ -153,6 +173,7 @@ async fn terminate_session(
     umount_overlay(&dirs.merged).await;
 
     db_sess::set_session_state(&state.pool, &session_id, "ended").await?;
+    state.broker.remove_entry(&session_id).await;
 
     tracing::info!(session_id = %session_id, "session terminated");
     Ok(StatusCode::NO_CONTENT)

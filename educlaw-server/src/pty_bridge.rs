@@ -11,15 +11,17 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::error::{AppError, Result};
+use crate::session::broker::now_secs;
 
 /// Message sent by the browser over the WebSocket connection.
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,8 @@ pub async fn run_pty_session(
     plugin_dir: PathBuf,
     env_vars: Vec<(String, String)>,
     model: Option<String>,
+    last_input_at: Arc<AtomicU64>,
+    mut broker_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
     let pty_system = native_pty_system();
 
@@ -80,6 +84,15 @@ pub async fn run_pty_session(
 
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
+    // Task: broker → PTY (watchdog warnings, teacher messages)
+    let broker_writer = Arc::clone(&master_writer);
+    let broker_fwd = tokio::spawn(async move {
+        while let Some(data) = broker_rx.recv().await {
+            let mut w = broker_writer.lock().await;
+            let _ = w.write_all(&data);
+        }
+    });
+
     // Task: PTY output → WebSocket
     let pty_to_ws = tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
@@ -117,6 +130,7 @@ pub async fn run_pty_session(
                 if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                     match client_msg {
                         ClientMessage::Input { data } => {
+                            last_input_at.store(now_secs(), Ordering::Relaxed);
                             let mut w = master_writer.lock().await;
                             let _ = w.write_all(data.as_bytes());
                         }
@@ -130,11 +144,13 @@ pub async fn run_pty_session(
                         }
                     }
                 } else {
+                    last_input_at.store(now_secs(), Ordering::Relaxed);
                     let mut w = master_writer.lock().await;
                     let _ = w.write_all(text.as_bytes());
                 }
             }
             Ok(Message::Binary(bytes)) => {
+                last_input_at.store(now_secs(), Ordering::Relaxed);
                 let mut w = master_writer.lock().await;
                 let _ = w.write_all(&bytes);
             }
@@ -143,6 +159,7 @@ pub async fn run_pty_session(
         }
     }
 
+    broker_fwd.abort();
     pty_to_ws.abort();
     let _ = child.kill();
 
