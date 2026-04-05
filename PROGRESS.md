@@ -42,15 +42,16 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 3.1 | `educlaw-mcp` process skeleton | ⬜ Pending | |
-| 3.2 | StudentContext MCP server | ⬜ Pending | |
-| 3.3 | ClassFiles MCP server | ⬜ Pending | |
-| 3.4 | StudentFiles MCP server | ⬜ Pending | |
-| 3.5 | EvalEngine MCP server | ⬜ Pending | |
-| 3.6 | Shell-in-namespace MCP | ⬜ Pending | |
-| 3.7 | `student_id` enforcement on every MCP request | ⬜ Pending | |
+| 3.1 | `educlaw-mcp` process skeleton | ✅ Done | `src/main.rs` — stdio + TCP transport, `make_tool` helper, no unsafe |
+| 3.2 | StudentContext MCP server | ✅ Done | `servers/student_context.rs` — 1 tool: `get_student_context` |
+| 3.3 | ClassFiles MCP server + hybrid search | ✅ Done | `servers/class_files.rs` — 4 tools: list/read/search/index; LanceDB hybrid (BM25+KNN+RRF) |
+| 3.4 | StudentFiles MCP server | ✅ Done | `servers/student_files.rs` — 3 tools: list/read/write; path traversal enforced |
+| 3.5 | EvalEngine MCP server | ⬜ Pending | Assignment Q&A spec, run_tests, check_answer, record_answer, submit |
+| 3.6 | Shell-in-namespace MCP | ⬜ Pending | Runs commands inside student's live namespace via nsenter |
+| 3.7 | `student_id` enforcement on every MCP request | ⚠️ Partial | Injected via `EDUCLAW_STUDENT_JSON` env; not validated per-call in tools |
 | 3.8 | System prompt template injection wired | ✅ Done | `init.sh` draws from `EDUCLAW_STUDENT_JSON` |
 | 3.9 | Python lib lower layer image | ⬜ Pending | numpy, sympy, matplotlib, scipy, pandas, rich |
+| 3.10 | Vector search index (LanceDB) | ✅ Done | `src/search_index.rs` — BM25 FTS + IVF-HNSW-SQ + RRF reranker; dim configurable via `EMBEDDING_DIM` |
 
 ---
 
