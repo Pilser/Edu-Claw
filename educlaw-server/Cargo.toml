@@ -58,3 +58,6 @@ futures-util = "0.3"
 
 # axum-extra for typed headers (Authorization: Bearer)
 axum-extra = { version = "0.9", features = ["typed-header"] }
+
+# Directory walking for file browser
+walkdir = "2"
