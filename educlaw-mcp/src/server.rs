@@ -92,7 +92,7 @@ impl EduclawMcpServer {
                 student_files::call_tool(name, args, &self.students_root, &self.student)
             }
             // EvalEngine
-            "list_assignments" | "get_assignment" | "check_answer"
+            "list_assignments" | "get_assignment"
             | "record_answer" | "get_progress" | "submit_assignment" => {
                 eval_engine::call_tool(
                     name,
@@ -101,6 +101,14 @@ impl EduclawMcpServer {
                     &self.students_root,
                     &self.student,
                 )
+            }
+            // check_answer uses async AI grading for essay-type questions
+            "check_answer" => {
+                eval_engine::check_answer_async(
+                    args,
+                    &self.classes_root,
+                    &self.student,
+                ).await
             }
             // Shell-in-namespace
             "run_command" | "run_python" => {

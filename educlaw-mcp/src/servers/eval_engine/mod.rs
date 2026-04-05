@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tracing::debug;
 
 use crate::config::StudentInfo;
-use checker::check_answer;
+use checker::{check_answer, grade_essay_ai};
 use records::{
     load_answers, require_student, save_answers, submitted_path, AnswerRecord, AnswersFile,
 };
@@ -251,6 +251,45 @@ fn handle_check_answer(
     debug!("check_answer class={class_id} assignment={assignment_id} q={question_id}");
 
     let out = check_answer(q, &answer);
+    let mut result = json!({ "correct": out.correct, "score": out.score, "max_points": q.points });
+    if let Some(hint) = out.hint { result["hint"] = json!(hint); }
+    ok_json(&result)
+}
+
+/// Async version of check_answer — uses AI grading for essay type questions
+/// when `EDUCLAW_AI_GRADING=1` is set. Falls back to keyword matching otherwise.
+pub async fn check_answer_async(
+    args: &serde_json::Map<String, Value>,
+    classes_root: &str,
+    student: &Option<StudentInfo>,
+) -> Result<CallToolResult, McpError> {
+    let str_arg = |key: &str| -> Result<String, McpError> {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| McpError::invalid_params(format!("missing `{key}`"), None))
+    };
+    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
+    let question_id   = str_arg("question_id")?;
+    let answer        = str_arg("answer")?;
+    let s = require_student(student)?;
+    s.assert_class_access(&class_id)?;
+
+    let spec = load_spec(classes_root, &class_id, &assignment_id)?;
+    let q = spec
+        .questions
+        .iter()
+        .find(|q| q.id == question_id)
+        .ok_or_else(|| McpError::invalid_params(format!("question `{question_id}` not found"), None))?;
+
+    debug!("check_answer_async class={class_id} assignment={assignment_id} q={question_id}");
+
+    let out = if q.kind == "essay" {
+        grade_essay_ai(q, &answer).await
+    } else {
+        check_answer(q, &answer)
+    };
     let mut result = json!({ "correct": out.correct, "score": out.score, "max_points": q.points });
     if let Some(hint) = out.hint { result["hint"] = json!(hint); }
     ok_json(&result)

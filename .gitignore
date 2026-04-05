@@ -6,3 +6,5 @@ claw-code-parity/
 memorymcp&api/
 node_modules/
 dist/
+educlaw-server
+educlaw-mcp

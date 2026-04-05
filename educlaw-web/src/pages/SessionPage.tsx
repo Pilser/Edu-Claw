@@ -2,9 +2,10 @@ import { useState, useCallback, useRef } from 'react'
 import TutorTerminal from '../components/TutorTerminal'
 import FileTree from '../components/FileTree'
 import AssignmentPanel from '../components/AssignmentPanel'
+import ChatPanel from '../components/ChatPanel'
 import { useWebSocket, type WsStatus } from '../hooks/useWebSocket'
 import { api } from '../api/client'
-import type { LoginResponse, Session, ShowImagePayload } from '../api/types'
+import type { LoginResponse, Session, ShowImagePayload, ChatMessage } from '../api/types'
 
 interface Props {
   auth: LoginResponse
@@ -34,13 +35,23 @@ function StatusDot({ status }: { status: WsStatus }) {
   )
 }
 
+let msgCounter = 0
+function nextId() { return `msg-${++msgCounter}` }
+
 export default function SessionPage({ auth, session, course, onEnd }: Props) {
-  const [sidebarOpen, setSidebarOpen]       = useState(true)
-  const [rightPanelOpen, setRightPanelOpen] = useState(true)
-  const [lightboxImage, setLightboxImage]   = useState<ShowImagePayload | null>(null)
+  const [sidebarOpen, setSidebarOpen]           = useState(true)
+  const [rightPanelOpen, setRightPanelOpen]     = useState(true)
+  const [terminalOpen, setTerminalOpen]         = useState(false)
+  const [lightboxImage, setLightboxImage]       = useState<ShowImagePayload | null>(null)
+
+  // Chat state
+  const [messages, setMessages]   = useState<ChatMessage[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [aiTyping, setAiTyping]   = useState(false)
+  const pendingMsgIdRef = useRef<string | null>(null)
 
   // Terminal write function set once xterm mounts
-  const ptyWriteRef  = useRef<((d: Uint8Array) => void) | null>(null)
+  const ptyWriteRef = useRef<((d: Uint8Array) => void) | null>(null)
 
   const handlePtyReady = useCallback(
     (write: (d: Uint8Array) => void, _resize: (cols: number, rows: number) => void) => {
@@ -57,12 +68,49 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
     setLightboxImage(p)
   }, [])
 
+  // ── Chat streaming callbacks ──────────────────────────────────────────────
+
+  const handleChatStart = useCallback(() => {
+    const id = nextId()
+    pendingMsgIdRef.current = id
+    setAiTyping(true)
+    setMessages(prev => [...prev, { id, role: 'assistant', text: '', pending: true }])
+  }, [])
+
+  const handleChatText = useCallback((text: string) => {
+    const id = pendingMsgIdRef.current
+    if (!id) return
+    setMessages(prev => prev.map(m =>
+      m.id === id ? { ...m, text: m.text + text } : m
+    ))
+  }, [])
+
+  const handleChatEnd = useCallback(() => {
+    const id = pendingMsgIdRef.current
+    if (id) {
+      setMessages(prev => prev.map(m =>
+        m.id === id ? { ...m, pending: false } : m
+      ))
+      pendingMsgIdRef.current = null
+    }
+    setAiTyping(false)
+  }, [])
+
   const { status, sendInput, sendResize } = useWebSocket({
-    sessionId: session.session_id,
-    token:     session.token,
-    onPtyData: handlePtyData,
-    onImage:   handleImage,
+    sessionId:    session.session_id,
+    token:        session.token,
+    onPtyData:    handlePtyData,
+    onImage:      handleImage,
+    onChatStart:  handleChatStart,
+    onChatText:   handleChatText,
+    onChatEnd:    handleChatEnd,
   })
+
+  // Patch handleSend to use the real sendInput (avoid closure ordering issue)
+  const handleSendWithWs = useCallback((text: string) => {
+    setMessages(prev => [...prev, { id: nextId(), role: 'user', text, pending: false }])
+    sendInput(text + '\n')
+  }, [sendInput])
 
   async function handleEndSession() {
     if (!confirm('End this session? Your progress is saved.')) return
@@ -74,41 +122,39 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
     <div className="flex flex-col h-screen bg-slate-100">
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="shrink-0 h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-4 shadow-sm">
-        {/* Logo */}
         <div className="flex items-center gap-2 mr-2">
           <span className="text-xl">🎓</span>
           <span className="font-bold text-slate-800 text-sm">EduClaw</span>
         </div>
 
-        {/* Course badge */}
         <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">
           {course}
         </span>
 
-        {/* Status */}
         <StatusDot status={status} />
 
         <div className="flex-1" />
 
-        {/* Student name */}
         <span className="text-sm text-slate-600 hidden sm:block">
           👤 {auth.display_name}
         </span>
 
-        {/* Sidebar toggle */}
+        {/* Toggle file browser */}
         <button
           onClick={() => setSidebarOpen(o => !o)}
           title="Toggle file browser"
-          className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700"
+          className={`p-2 rounded-lg text-sm transition-colors
+            ${sidebarOpen ? 'bg-slate-100 text-slate-700' : 'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}
         >
           📁
         </button>
 
-        {/* Progress toggle */}
+        {/* Toggle assignment progress */}
         <button
           onClick={() => setRightPanelOpen(o => !o)}
-          title="Toggle progress"
-          className="p-2 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700"
+          title="Toggle assignment progress"
+          className={`p-2 rounded-lg text-sm transition-colors
+            ${rightPanelOpen ? 'bg-slate-100 text-slate-700' : 'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}
         >
           📊
         </button>
@@ -136,30 +182,51 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
                 token={session.token}
                 sessionId={session.session_id}
                 classId={course}
-                onFileSelect={(_path, name) => {
-                  // Phase 4 — file viewer; for now just log
-                  console.info('file selected:', name)
-                }}
+                onFileSelect={(_path, name) => { console.info('file selected:', name) }}
               />
             </div>
           </aside>
         )}
 
-        {/* Centre — AI Tutor terminal */}
-        <main className="flex-1 flex flex-col overflow-hidden p-3 gap-2">
-          {/* Section label */}
-          <div className="shrink-0 flex items-center gap-2">
-            <span className="text-sm font-semibold text-slate-700">🤖 AI Tutor</span>
-            <span className="text-xs text-slate-400">Powered by Claude</span>
+        {/* Centre — Chat + collapsible terminal */}
+        <main className="flex-1 flex flex-col overflow-hidden min-w-0">
+
+          {/* Chat panel — primary, fills available space */}
+          <div className="flex-1 overflow-hidden bg-slate-50">
+            <ChatPanel
+              messages={messages}
+              inputValue={chatInput}
+              onInputChange={setChatInput}
+              onSend={handleSendWithWs}
+              disabled={status !== 'connected' || aiTyping}
+            />
           </div>
 
-          {/* Terminal card */}
-          <div className="flex-1 rounded-xl overflow-hidden shadow-inner border border-slate-800 bg-slate-900">
-            <TutorTerminal
-              onPtyReady={handlePtyReady}
-              onInput={sendInput}
-              onResize={sendResize}
-            />
+          {/* Terminal — collapsed by default, toggled open */}
+          <div className="shrink-0 border-t border-slate-300 bg-slate-900">
+            {/* Toggle bar */}
+            <button
+              className="w-full flex items-center justify-between px-4 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+              onClick={() => setTerminalOpen(o => !o)}
+            >
+              <span className="flex items-center gap-2">
+                <span>{terminalOpen ? '▼' : '▶'}</span>
+                <span className="font-mono">Terminal</span>
+                <span className="text-slate-600">— shell & code execution</span>
+              </span>
+              <span className="text-slate-600 text-[10px]">
+                {terminalOpen ? 'Click to collapse' : 'Click to expand'}
+              </span>
+            </button>
+
+            {/* xterm.js — always mounted, just hidden when closed so PTY stream is preserved */}
+            <div className={`overflow-hidden transition-all duration-200 ${terminalOpen ? 'h-64' : 'h-0'}`}>
+              <TutorTerminal
+                onPtyReady={handlePtyReady}
+                onInput={sendInput}
+                onResize={sendResize}
+              />
+            </div>
           </div>
         </main>
 
@@ -179,7 +246,7 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
         )}
       </div>
 
-      {/* ── Image lightbox (Phase 4.5) ──────────────────────────────────── */}
+      {/* ── Image lightbox ───────────────────────────────────────────────── */}
       {lightboxImage && (
         <div
           className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
@@ -213,3 +280,4 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
     </div>
   )
 }
+

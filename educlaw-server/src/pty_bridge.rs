@@ -8,10 +8,16 @@
 //   3. We relay PTY output → WebSocket and WebSocket input → PTY
 //   4. We handle resize events: {"type":"resize","cols":N,"rows":N}
 //   5. Raw text / binary frames are forwarded as terminal input
+//
+// Chat panel routing (added for hybrid UI):
+//   When the user sends a message (ClientMessage::Input), we set a flag
+//   and route ANSI-stripped PTY text as {"type":"chat_text","text":"..."} frames.
+//   When the claw REPL prompt ("> ") appears in the PTY stream, we emit
+//   {"type":"chat_end"} and stop accumulating until the next user input.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -95,6 +101,63 @@ fn safe_output_len(data: &[u8]) -> usize {
     data.len()
 }
 
+// ---------------------------------------------------------------------------
+// ANSI stripping + chat turn detection
+// ---------------------------------------------------------------------------
+
+/// Remove ANSI/VT100 escape sequences from a string to produce clean text.
+/// Handles CSI sequences (\x1b[...X), OSC sequences (\x1b]...\x07 or \x1b]...\x1b\\),
+/// and simple two-byte sequences (\x1b X).
+fn strip_ansi(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i >= bytes.len() { break; }
+            match bytes[i] {
+                b'[' => {
+                    // CSI: skip until final byte (0x40–0x7e)
+                    i += 1;
+                    while i < bytes.len() && !(0x40..=0x7eu8).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b']' => {
+                    // OSC: skip until BEL (0x07) or ST (\x1b\\)
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 { i += 1; break; }
+                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i+1] == b'\\' {
+                            i += 2; break;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => { i += 1; } // skip 2-byte sequence
+            }
+        } else if bytes[i] == 0x07 || bytes[i] == 0x08 || bytes[i] == 0x0c {
+            // BEL, BS, FF — skip
+            i += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Returns true when `text` (ANSI-stripped) ends with the claw REPL prompt
+/// `> ` on a new line — indicating Claude has finished and is awaiting input.
+fn ends_with_repl_prompt(text: &str) -> bool {
+    // The claw REPL prompt is "> " (from LineEditor::new("> ", ...)).
+    // After a response, the PTY will contain "...response text\r\n> " or similar.
+    let t = text.trim_end_matches(' ');
+    t.ends_with("\n>") || t.ends_with("\r>") || t == ">"
+}
+
 /// Map an image file extension to a MIME type for the data-URL.
 fn mime_for_image(path: &Path) -> &'static str {
     let ext = path
@@ -173,6 +236,14 @@ pub async fn run_pty_session(
 
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
+    // ── Chat routing state ─────────────────────────────────────────────────
+    // `chat_active`: true while we're waiting for Claude's response.
+    // `ctrl_tx`: sends chat control frames (chat_start) from the input loop
+    //            to the pty_to_ws task, which owns ws_sender.
+    let chat_active = Arc::new(AtomicBool::new(false));
+    let chat_active_pty = Arc::clone(&chat_active);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(8);
+
     // Task: broker → PTY (watchdog warnings, teacher messages)
     let broker_writer = Arc::clone(&master_writer);
     let broker_fwd = tokio::spawn(async move {
@@ -182,7 +253,7 @@ pub async fn run_pty_session(
         }
     });
 
-    // Task: PTY output → WebSocket
+    // Task: PTY output → WebSocket  (also handles chat_text routing)
     let osc_workspace = workspace.clone();
     let pty_to_ws = tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
@@ -203,60 +274,105 @@ pub async fn run_pty_session(
         });
 
         let mut osc_buf: Vec<u8> = Vec::new();
-        'outer: while let Some(data) = rx.recv().await {
-            let (clean, envelopes) = split_pty_output(&data, &mut osc_buf);
+        // Accumulator for ANSI-stripped text during an AI turn.
+        let mut chat_clean_buf = String::new();
 
-            // Forward clean terminal bytes as a binary frame
-            if !clean.is_empty()
-                && ws_sender
-                    .send(Message::Binary(clean.into()))
-                    .await
-                    .is_err()
-            {
-                break;
-            }
-
-            // Forward each extracted envelope as a JSON text frame
-            for env in envelopes {
-                let json_msg =
-                    if env.get("type").and_then(|t| t.as_str()) == Some("show_image") {
-                        // Resolve image path, base64-encode the file, build data-URL
-                        let path_str = match env
-                            .get("payload")
-                            .and_then(|p| p.get("path"))
-                            .and_then(|p| p.as_str())
-                        {
-                            Some(s) => s.to_owned(),
-                            None => continue,
-                        };
-                        let img_path = if Path::new(&path_str).is_absolute() {
-                            PathBuf::from(&path_str)
-                        } else {
-                            osc_workspace.join(&path_str)
-                        };
-                        match tokio::fs::read(&img_path).await {
-                            Ok(bytes) => serde_json::json!({
-                                "type": "show_image",
-                                "payload": {
-                                    "path": path_str,
-                                    "data_url": format!(
-                                        "data:{};base64,{}",
-                                        mime_for_image(&img_path),
-                                        STANDARD.encode(&bytes)
-                                    )
-                                }
-                            }),
-                            Err(_) => continue,
-                        }
-                    } else {
-                        env
-                    };
-
-                if let Ok(text) = serde_json::to_string(&json_msg) {
-                    if ws_sender.send(Message::Text(text)).await.is_err() {
+        'outer: loop {
+            tokio::select! {
+                // Forward chat control frames (chat_start) from the input loop.
+                Some(ctrl_msg) = ctrl_rx.recv() => {
+                    if ws_sender.send(Message::Text(ctrl_msg)).await.is_err() {
                         break 'outer;
                     }
                 }
+                // Process PTY output bytes.
+                Some(data) = rx.recv() => {
+                    let (clean, envelopes) = split_pty_output(&data, &mut osc_buf);
+
+                    // ── Chat panel routing ──────────────────────────────
+                    if chat_active_pty.load(Ordering::Relaxed) && !clean.is_empty() {
+                        let text_chunk = strip_ansi(
+                            &String::from_utf8_lossy(&clean)
+                        );
+                        if !text_chunk.is_empty() {
+                            chat_clean_buf.push_str(&text_chunk);
+
+                            // Stream the chunk to the chat panel.
+                            let frame = serde_json::json!({
+                                "type": "chat_text",
+                                "text": text_chunk
+                            });
+                            if let Ok(json) = serde_json::to_string(&frame) {
+                                if ws_sender.send(Message::Text(json)).await.is_err() {
+                                    break 'outer;
+                                }
+                            }
+
+                            // Detect the claw REPL prompt: turn is over.
+                            if ends_with_repl_prompt(&chat_clean_buf) {
+                                chat_active_pty.store(false, Ordering::Relaxed);
+                                chat_clean_buf.clear();
+                                let end_frame = r#"{"type":"chat_end"}"#.to_string();
+                                if ws_sender.send(Message::Text(end_frame)).await.is_err() {
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Always forward raw PTY bytes to xterm.js ────────
+                    if !clean.is_empty()
+                        && ws_sender
+                            .send(Message::Binary(clean.into()))
+                            .await
+                            .is_err()
+                    {
+                        break 'outer;
+                    }
+
+                    // ── Forward OSC envelopes as JSON frames ────────────
+                    for env in envelopes {
+                        let json_msg =
+                            if env.get("type").and_then(|t| t.as_str()) == Some("show_image") {
+                                let path_str = match env
+                                    .get("payload")
+                                    .and_then(|p| p.get("path"))
+                                    .and_then(|p| p.as_str())
+                                {
+                                    Some(s) => s.to_owned(),
+                                    None => continue,
+                                };
+                                let img_path = if Path::new(&path_str).is_absolute() {
+                                    PathBuf::from(&path_str)
+                                } else {
+                                    osc_workspace.join(&path_str)
+                                };
+                                match tokio::fs::read(&img_path).await {
+                                    Ok(bytes) => serde_json::json!({
+                                        "type": "show_image",
+                                        "payload": {
+                                            "path": path_str,
+                                            "data_url": format!(
+                                                "data:{};base64,{}",
+                                                mime_for_image(&img_path),
+                                                STANDARD.encode(&bytes)
+                                            )
+                                        }
+                                    }),
+                                    Err(_) => continue,
+                                }
+                            } else {
+                                env
+                            };
+
+                        if let Ok(text) = serde_json::to_string(&json_msg) {
+                            if ws_sender.send(Message::Text(text)).await.is_err() {
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                else => break 'outer,
             }
         }
     });
@@ -269,6 +385,13 @@ pub async fn run_pty_session(
                     match client_msg {
                         ClientMessage::Input { data } => {
                             last_input_at.store(now_secs(), Ordering::Relaxed);
+                            // Signal chat panel: Claude is about to respond.
+                            if !data.trim().is_empty() {
+                                chat_active.store(true, Ordering::Relaxed);
+                                let _ = ctrl_tx
+                                    .send(r#"{"type":"chat_start"}"#.to_string())
+                                    .await;
+                            }
                             let mut w = master_writer.lock().await;
                             let _ = w.write_all(data.as_bytes());
                         }

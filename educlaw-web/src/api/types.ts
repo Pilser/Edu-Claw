@@ -24,6 +24,9 @@ export type WsEnvelopeType =
   | 'show_image'
   | 'file_change'
   | 'progress_update'
+  | 'chat_start'
+  | 'chat_text'
+  | 'chat_end'
 
 export interface WsEnvelope {
   type: WsEnvelopeType
@@ -53,4 +56,14 @@ export interface QuestionProgress {
   score: number
   max_points: number
   attempts: number
+}
+
+// Chat panel message types
+export type ChatRole = 'user' | 'assistant'
+
+export interface ChatMessage {
+  id: string
+  role: ChatRole
+  text: string        // accumulated markdown text
+  pending: boolean    // true while still streaming
 }

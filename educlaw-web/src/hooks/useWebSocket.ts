@@ -8,9 +8,12 @@ interface Options {
   token: string
   onPtyData: (data: Uint8Array) => void
   onImage: (p: ShowImagePayload) => void
+  onChatStart?: () => void
+  onChatText?: (text: string) => void
+  onChatEnd?: () => void
 }
 
-export function useWebSocket({ sessionId, token, onPtyData, onImage }: Options) {
+export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart, onChatText, onChatEnd }: Options) {
   const [status, setStatus] = useState<WsStatus>('connecting')
   const wsRef = useRef<WebSocket | null>(null)
   const keepaliveRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -62,8 +65,23 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage }: Options) 
       } else {
         // JSON control frame from server
         try {
-          const frame = JSON.parse(e.data as string)
-          if (frame.type === 'show_image') onImage(frame.payload as ShowImagePayload)
+          const frame = JSON.parse(e.data as string) as { type: string; text?: string; payload?: unknown }
+          switch (frame.type) {
+            case 'show_image':
+              onImage(frame.payload as ShowImagePayload)
+              break
+            case 'chat_start':
+              onChatStart?.()
+              break
+            case 'chat_text':
+              if (frame.text) onChatText?.(frame.text)
+              break
+            case 'chat_end':
+              onChatEnd?.()
+              break
+            default:
+              break
+          }
         } catch { /* ignore */ }
       }
     }
@@ -79,7 +97,7 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage }: Options) 
       ws.close()
       if (keepaliveRef.current) clearInterval(keepaliveRef.current)
     }
-  }, [sessionId, token, onPtyData, onImage])
+  }, [sessionId, token, onPtyData, onImage, onChatStart, onChatText, onChatEnd])
 
   return { status, sendInput, sendResize }
 }

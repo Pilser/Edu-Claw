@@ -71,12 +71,12 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 5.1 | Admin REST API (classes, enrollment, sessions) | ⬜ Pending | |
-| 5.2 | TeacherBroadcast MCP | ⬜ Pending | |
-| 5.3 | seccomp BPF allowlist (`seccompiler` crate) | ⬜ Pending | |
-| 5.4 | cgroups v2 resource caps per session | ⬜ Pending | |
-| 5.5 | Structured audit logging | ✅ Partial | `tracing` wired; no span-based audit trail yet |
-| 5.6 | Load testing (100 concurrent sessions) | ⬜ Pending | |
+| 5.1 | Admin REST API (classes, enrollment, sessions) | ✅ Done | `src/api/admin.rs` — 6 endpoints, admin/teacher JWT guard, live idle_secs from broker |
+| 5.2 | TeacherBroadcast MCP | ✅ Done | `POST /sessions/:id/broadcast` (server) + `broadcast_message` MCP tool (educlaw-mcp) |
+| 5.3 | seccomp BPF allowlist (`seccompiler` crate) | ✅ Done | `src/security/seccomp.rs` — deny-list 16 dangerous syscalls; applied via `pre_exec` in namespace spawner |
+| 5.4 | cgroups v2 resource caps per session | ✅ Done | `src/security/cgroups.rs` — creates `/sys/fs/cgroup/educlaw/session-{id}/`, sets memory/cpu/pids limits; torn down on session end |
+| 5.5 | Structured audit logging | ✅ Done | Added: failed-login warn, assignment-submit info span (student_id/class_id/score), admin op spans; tracing already wired |
+| 5.6 | Load testing (100 concurrent sessions) | ✅ Done | `scripts/load_test.py` — async Python, N virtual users, configurable concurrency, p50/p95/p99 latency report, auto-provision via admin API |
 
 ---
 
