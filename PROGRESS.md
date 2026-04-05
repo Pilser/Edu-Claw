@@ -46,7 +46,7 @@
 | 3.2 | StudentContext MCP server | ✅ Done | `servers/student_context.rs` — 1 tool: `get_student_context` |
 | 3.3 | ClassFiles MCP server + hybrid search | ✅ Done | `servers/class_files.rs` — 4 tools: list/read/search/index; LanceDB hybrid (BM25+KNN+RRF) |
 | 3.4 | StudentFiles MCP server | ✅ Done | `servers/student_files.rs` — 3 tools: list/read/write; path traversal enforced |
-| 3.5 | EvalEngine MCP server | ⬜ Pending | Assignment Q&A spec, run_tests, check_answer, record_answer, submit |
+| 3.5 | EvalEngine MCP server | ✅ Done | `servers/eval_engine/` — 6 tools: list/get_assignment, check/record_answer, get_progress, submit; modular spec/records/checker submodules |
 | 3.6 | Shell-in-namespace MCP | ✅ Done | `servers/shell_ns.rs` — 2 tools: `run_command`, `run_python`; nsenter via session API lookup; matplotlib figure auto-capture |
 | 3.7 | `student_id` enforcement on every MCP request | ⚠️ Partial | Injected via `EDUCLAW_STUDENT_JSON` env; not validated per-call in tools |
 | 3.8 | System prompt template injection wired | ✅ Done | `init.sh` draws from `EDUCLAW_STUDENT_JSON` |

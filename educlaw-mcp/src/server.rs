@@ -17,7 +17,7 @@ use tracing::{error, info};
 use crate::config::{Config, StudentInfo};
 use crate::embedding::EmbeddingClient;
 use crate::search_index::SearchIndex;
-use crate::servers::{class_files, shell_ns, student_context, student_files};
+use crate::servers::{class_files, eval_engine, shell_ns, student_context, student_files};
 
 // ── Server state ─────────────────────────────────────────────
 
@@ -56,6 +56,7 @@ impl EduclawMcpServer {
     fn all_tools(&self) -> Vec<Tool> {
         let mut tools = Vec::new();
         tools.extend(class_files::tools());
+        tools.extend(eval_engine::tools());
         tools.extend(shell_ns::tools());
         tools.extend(student_context::tools());
         tools.extend(student_files::tools());
@@ -87,6 +88,17 @@ impl EduclawMcpServer {
             // StudentFiles
             "list_student_files" | "read_student_file" | "write_student_file" => {
                 student_files::call_tool(name, args, &self.students_root, &self.student)
+            }
+            // EvalEngine
+            "list_assignments" | "get_assignment" | "check_answer"
+            | "record_answer" | "get_progress" | "submit_assignment" => {
+                eval_engine::call_tool(
+                    name,
+                    args,
+                    &self.classes_root,
+                    &self.students_root,
+                    &self.student,
+                )
             }
             // Shell-in-namespace
             "run_command" | "run_python" => {
