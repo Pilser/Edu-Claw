@@ -59,11 +59,11 @@
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 4.1 | File browser REST API (7 endpoints) | ⬜ Pending | |
-| 4.2 | WsEnvelope dispatcher in browser JS | ⬜ Pending | |
-| 4.3 | PTY bridge OSC envelope interceptor (`split_pty_output`) | ⬜ Pending | |
-| 4.4 | PDF→MD conversion pipeline | ⬜ Pending | pymupdf + markdownify |
-| 4.5 | Image preview via `show_image` envelope | ⬜ Pending | |
+| 4.1 | File browser REST API (7 endpoints) | ✅ Done | `src/api/files.rs` — 6 endpoints, JWT auth, path traversal prevention |
+| 4.2 | WsEnvelope dispatcher in browser JS | ✅ Done | `educlaw-web/src/hooks/useWebSocket.ts` — OSC parser + envelope routing |
+| 4.3 | PTY bridge OSC envelope interceptor (`split_pty_output`) | ✅ Done | `src/pty_bridge.rs` — state-machine, cross-chunk safe, base64 image embed |
+| 4.4 | PDF→MD conversion pipeline | ~~REMOVED~~ | Out of scope — teachers pre-process PDFs externally (marker, Mathpix, Claude); upload ready-made `.md` + figures folder. Automated in-system conversion unreliable for academic content (math, tables, multi-column). |
+| 4.5 | Image preview via `show_image` envelope | ✅ Done | Wired end-to-end: 4.3 OSC interceptor → JSON frame → `SessionPage.tsx` lightbox |
 
 ---
 

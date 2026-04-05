@@ -61,3 +61,6 @@ axum-extra = { version = "0.9", features = ["typed-header"] }
 
 # Directory walking for file browser
 walkdir = "2"
+
+# Base64 encoding for image data-URLs
+base64 = "0.22"

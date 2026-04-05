@@ -422,6 +422,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-extra",
+ "base64 0.22.1",
  "chrono",
  "dotenvy",
  "futures-util",
