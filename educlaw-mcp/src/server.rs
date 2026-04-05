@@ -78,6 +78,7 @@ impl EduclawMcpServer {
                     &self.classes_root,
                     &self.index,
                     &self.embedding,
+                    &self.student,
                 )
                 .await
             }

@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* ── xterm.js needs the container to have a fixed size ── */
+.xterm-container {
+  width: 100%;
+  height: 100%;
+}
+.xterm-container .xterm {
+  height: 100%;
+}

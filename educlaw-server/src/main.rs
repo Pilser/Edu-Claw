@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let broker = SessionBroker::new();
 
     let web_root = std::env::var("EDUCLAW_WEB_ROOT")
-        .unwrap_or_else(|_| "./educlaw-web".to_string());
+        .unwrap_or_else(|_| "./educlaw-web/dist".to_string());
 
     let state = api::AppState::new(pool, auth_config, workspace_root, plugin_path, claw_bin, broker);
 

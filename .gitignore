@@ -4,3 +4,5 @@ claw
 aut.txt
 claw-code-parity/
 memorymcp&api/
+node_modules/
+dist/

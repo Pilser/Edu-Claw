@@ -82,3 +82,25 @@ pub struct StudentInfo {
     #[serde(default)]
     pub session_id: Option<String>,
 }
+
+impl StudentInfo {
+    /// Returns `Ok(())` if this session is allowed to access `class_id`.
+    /// Teachers (role == "teacher") are allowed all classes.
+    /// Students must be explicitly enrolled.
+    pub fn assert_class_access(&self, class_id: &str) -> Result<(), rmcp::ErrorData> {
+        if self.role == "teacher" {
+            return Ok(());
+        }
+        if self.class_ids.iter().any(|c| c == class_id) {
+            Ok(())
+        } else {
+            Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "student `{}` is not enrolled in class `{class_id}`",
+                    self.student_id
+                ),
+                None,
+            ))
+        }
+    }
+}

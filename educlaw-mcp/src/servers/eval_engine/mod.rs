@@ -138,9 +138,9 @@ pub fn call_tool(
     };
 
     match name {
-        "list_assignments"  => handle_list_assignments(str_arg, classes_root),
-        "get_assignment"    => handle_get_assignment(str_arg, classes_root),
-        "check_answer"      => handle_check_answer(str_arg, classes_root),
+        "list_assignments"  => handle_list_assignments(str_arg, classes_root, student),
+        "get_assignment"    => handle_get_assignment(str_arg, classes_root, student),
+        "check_answer"      => handle_check_answer(str_arg, classes_root, student),
         "record_answer"     => handle_record_answer(str_arg, classes_root, students_root, student),
         "get_progress"      => handle_get_progress(str_arg, classes_root, students_root, student),
         "submit_assignment" => handle_submit(str_arg, classes_root, students_root, student),
@@ -153,8 +153,11 @@ pub fn call_tool(
 fn handle_list_assignments(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
     classes_root: &str,
+    student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
     let class_id = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let s = require_student(student)?;
+    s.assert_class_access(&class_id)?;
     let dir = PathBuf::from(classes_root).join(&class_id).join("assignments");
 
     let entries = std::fs::read_dir(&dir)
@@ -192,9 +195,12 @@ fn handle_list_assignments(
 fn handle_get_assignment(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
     classes_root: &str,
+    student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
     let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
+    let s = require_student(student)?;
+    s.assert_class_access(&class_id)?;
     let spec = load_spec(classes_root, &class_id, &assignment_id)?;
 
     // Strip expected answers and rubric before returning
@@ -226,11 +232,14 @@ fn handle_get_assignment(
 fn handle_check_answer(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
     classes_root: &str,
+    student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
     let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let question_id   = str_arg("question_id")?;
     let answer        = str_arg("answer")?;
+    let s = require_student(student)?;
+    s.assert_class_access(&class_id)?;
 
     let spec = load_spec(classes_root, &class_id, &assignment_id)?;
     let q = spec
@@ -258,6 +267,7 @@ fn handle_record_answer(
     let question_id   = str_arg("question_id")?;
     let answer        = str_arg("answer")?;
     let s = require_student(student)?;
+    s.assert_class_access(&class_id)?;
 
     if submitted_path(students_root, &s.student_id, &assignment_id).exists() {
         return Err(McpError::invalid_params(
@@ -300,8 +310,8 @@ fn handle_get_progress(
     let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
-
-    let spec      = load_spec(classes_root, &class_id, &assignment_id)?;
+    s.assert_class_access(&class_id)?
+;    let spec      = load_spec(classes_root, &class_id, &assignment_id)?;;
     let af        = load_answers(students_root, &s.student_id, &assignment_id);
     let submitted = submitted_path(students_root, &s.student_id, &assignment_id).exists();
 
@@ -346,6 +356,7 @@ fn handle_submit(
     let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
+    s.assert_class_access(&class_id)?;
 
     let sub_p = submitted_path(students_root, &s.student_id, &assignment_id);
     if sub_p.exists() {

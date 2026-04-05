@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 
 use crate::embedding::EmbeddingClient;
 use crate::search_index::SearchIndex;
+use crate::config::StudentInfo;
 
 // ── Tool definitions (input schemas) ───────────────────────────────────────
 
@@ -92,21 +93,30 @@ pub async fn call_tool(
     classes_root: &str,
     index: &Arc<SearchIndex>,
     embedding: &Arc<EmbeddingClient>,
+    student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
+    // Require a student context for all class operations
+    let s = student
+        .as_ref()
+        .ok_or_else(|| McpError::internal_error("no student context", None))?;
+
     match name {
         "list_class_files" => {
             let class_id = get_str(args, "class_id")?;
+            s.assert_class_access(&class_id)?;
             let base = class_dir(classes_root, &class_id)?;
             list_files(&base)
         }
         "read_class_file" => {
             let class_id = get_str(args, "class_id")?;
+            s.assert_class_access(&class_id)?;
             let path = get_str(args, "path")?;
             let base = class_dir(classes_root, &class_id)?;
             read_file(&base, &path)
         }
         "search_class_content" => {
             let class_id = get_str(args, "class_id")?;
+            s.assert_class_access(&class_id)?;
             let query = get_str(args, "query")?;
             let limit = args
                 .get("limit")
@@ -116,6 +126,13 @@ pub async fn call_tool(
         }
         "index_class_file" => {
             let class_id = get_str(args, "class_id")?;
+            // Only teachers may index files
+            if s.role != "teacher" {
+                return Err(McpError::invalid_params(
+                    "only teachers may index class files",
+                    None,
+                ));
+            }
             let path = get_str(args, "path")?;
             let base = class_dir(classes_root, &class_id)?;
             index_file(&base, class_id, path, index, embedding, index.dim).await
