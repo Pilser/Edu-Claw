@@ -8,3 +8,4 @@ node_modules/
 dist/
 educlaw-server
 educlaw-mcp
+MemoryEngine/

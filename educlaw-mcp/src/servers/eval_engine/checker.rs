@@ -127,6 +127,7 @@ struct AiGradeResult {
 
 async fn try_ai_grade(q: &QuestionSpec, answer: &str) -> Result<CheckOutcome, String> {
     let claw = std::env::var("CLAW_BIN").unwrap_or_else(|_| "claw".to_string());
+    let model = std::env::var("CLAW_MODEL").unwrap_or_else(|_| "grok-3".to_string());
     let keywords = q.rubric_keywords.as_deref().unwrap_or(&[]).join(", ");
     let prompt = format!(
         "You are an essay grader. Grade the following student answer.\n\
@@ -144,7 +145,7 @@ async fn try_ai_grade(q: &QuestionSpec, answer: &str) -> Result<CheckOutcome, St
     );
 
     let output = tokio::process::Command::new(&claw)
-        .args(["--output-format", "json", "prompt", &prompt])
+        .args(["--model", &model, "--output-format", "json", "prompt", &prompt])
         .output()
         .await
         .map_err(|e| format!("failed to spawn claw: {e}"))?;
