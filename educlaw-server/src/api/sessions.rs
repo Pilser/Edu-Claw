@@ -3,6 +3,7 @@
 // POST   /sessions        — create and initialise a student session
 // GET    /sessions/:id    — get session status
 // DELETE /sessions/:id    — terminate session (SIGTERM + umount)
+// POST   /sessions/:id/broadcast — push a message to a session's PTY (teacher/admin)
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
@@ -20,6 +21,7 @@ use uuid::Uuid;
 
 use crate::db::sessions::{self as db_sess, Session};
 use crate::db::students;
+use crate::auth::bearer_token;
 use crate::error::{AppError, Result};
 use crate::session::{
     broker::now_secs,
@@ -35,6 +37,7 @@ pub fn routes() -> Router<AppState> {
         .route("/sessions", post(create_session))
         .route("/sessions/:id", get(get_session))
         .route("/sessions/:id", delete(terminate_session))
+        .route("/sessions/:id/broadcast", post(broadcast_message))
 }
 
 // ── Create session ────────────────────────────────────────────────────────
@@ -151,6 +154,8 @@ async fn create_session(
     match spawn_claw_session(&spawn_params).await {
         Ok(pid) => {
             let _ = db_sess::set_namespace_pid(&state.pool, &session_id, pid as i64).await;
+            // Apply cgroups v2 resource caps (best-effort; logs on failure).
+            crate::security::cgroups::setup_session_cgroup(&session_id, pid).await;
             tracing::info!(session_id = %session_id, pid = pid, "claw namespace spawned");
         }
         Err(e) => {
@@ -221,7 +226,52 @@ async fn terminate_session(
 
     db_sess::set_session_state(&state.pool, &session_id, "ended").await?;
     state.broker.remove_entry(&session_id).await;
+    crate::security::cgroups::teardown_session_cgroup(&session_id).await;
 
     tracing::info!(session_id = %session_id, "session terminated");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Broadcast message ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct BroadcastBody {
+    message: String,
+    /// If true, send to ALL active sessions (teacher/admin only).
+    #[serde(default)]
+    all: bool,
+}
+
+async fn broadcast_message(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<BroadcastBody>,
+) -> Result<impl IntoResponse> {
+    // Require teacher or admin role.
+    let token = bearer_token(&headers).ok_or(AppError::Unauthorized)?;
+    let claims = state.auth.verify(token)?;
+    if claims.role != "teacher" && claims.role != "admin" {
+        return Err(AppError::Forbidden);
+    }
+
+    // Format the banner: ANSI bold yellow, visible on any dark/light terminal.
+    let banner = format!(
+        "\r\n\x1b[1;33m[EduClaw] {}\x1b[0m\r\n",
+        body.message
+    );
+    let bytes = banner.into_bytes();
+
+    if body.all {
+        let sessions = state.broker.list_entries().await;
+        for (sid, _) in sessions {
+            state.broker.write_to_pty(&sid, bytes.clone()).await;
+        }
+        tracing::info!(from = %claims.sub, "broadcast to all sessions");
+    } else {
+        state.broker.write_to_pty(&session_id, bytes).await;
+        tracing::info!(session_id = %session_id, from = %claims.sub, "broadcast to session");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }

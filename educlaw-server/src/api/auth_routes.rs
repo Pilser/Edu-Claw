@@ -32,10 +32,14 @@ async fn student_login(
 ) -> Result<impl IntoResponse> {
     let student = students::get_student_by_username(&state.pool, &body.username)
         .await?
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or_else(|| {
+            tracing::warn!(username = %body.username, "login: unknown username");
+            AppError::Unauthorized
+        })?;
 
     // Constant-time Argon2id verification
     if !auth::verify_password(&body.password, &student.password_hash)? {
+        tracing::warn!(username = %body.username, student_id = %student.id, "login: incorrect password");
         return Err(AppError::Unauthorized);
     }
 

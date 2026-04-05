@@ -402,6 +402,15 @@ fn handle_submit(
     std::fs::write(&sub_p, serde_json::to_string_pretty(&doc).unwrap())
         .map_err(|e| McpError::invalid_params(format!("cannot write submitted: {e}"), None))?;
 
+    tracing::info!(
+        student_id = %s.student_id,
+        class_id = %class_id,
+        assignment_id = %assignment_id,
+        total_score = total,
+        max_score = max,
+        "assignment submitted"
+    );
+
     ok_json(&doc)
 }
 

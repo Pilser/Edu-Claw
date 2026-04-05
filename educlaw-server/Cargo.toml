@@ -64,3 +64,7 @@ walkdir = "2"
 
 # Base64 encoding for image data-URLs
 base64 = "0.22"
+
+# Security hardening
+seccompiler = "0.5"
+libc = "0.2"

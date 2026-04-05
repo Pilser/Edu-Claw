@@ -17,7 +17,7 @@ use tracing::{error, info};
 use crate::config::{Config, StudentInfo};
 use crate::embedding::EmbeddingClient;
 use crate::search_index::SearchIndex;
-use crate::servers::{class_files, eval_engine, shell_ns, student_context, student_files};
+use crate::servers::{class_files, eval_engine, shell_ns, student_context, student_files, teacher_broadcast};
 
 // ── Server state ─────────────────────────────────────────────
 
@@ -60,6 +60,7 @@ impl EduclawMcpServer {
         tools.extend(shell_ns::tools());
         tools.extend(student_context::tools());
         tools.extend(student_files::tools());
+        tools.extend(teacher_broadcast::tools());
         tools
     }
 
@@ -104,6 +105,10 @@ impl EduclawMcpServer {
             // Shell-in-namespace
             "run_command" | "run_python" => {
                 shell_ns::call_tool(name, args, &self.config).await
+            }
+            // TeacherBroadcast
+            "broadcast_message" => {
+                teacher_broadcast::call_tool(name, args, &self.student, &self.config).await
             }
             _ => Err(McpError::invalid_params(
                 format!("unknown tool: {name}"),

@@ -2,6 +2,7 @@
 //
 // Shared application state and route assembly.
 
+mod admin;
 mod auth_routes;
 mod files;
 mod sessions;
@@ -45,6 +46,7 @@ impl AppState {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(auth_routes::routes())
+        .merge(admin::routes())
         .merge(students::routes())
         .merge(sessions::routes())
         .merge(ws::routes())

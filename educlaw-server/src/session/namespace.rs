@@ -7,6 +7,9 @@ use std::path::Path;
 
 use tokio::process::Command;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt as _;
+
 use crate::error::{AppError, Result};
 use crate::session::dirs::SessionDirs;
 
@@ -105,6 +108,29 @@ pub async fn spawn_claw_session(params: &SpawnParams) -> Result<u32> {
     cmd.env("EDUCLAW_WORKSPACE", &params.dirs.merged);
     for (key, value) in &params.env {
         cmd.env(key, value);
+    }
+
+    // Apply seccomp BPF deny-list in the child process (Linux only).
+    // Built once here in the parent, serial-copied into the pre_exec closure.
+    #[cfg(target_os = "linux")]
+    {
+        match crate::security::seccomp::build_student_filter() {
+            Ok(filter) => {
+                // SAFETY: pre_exec runs in the child after fork(), single-threaded,
+                // before exec(). seccompiler::apply_filter is async-signal-safe
+                // (only calls prctl).
+                unsafe {
+                    cmd.pre_exec(move || {
+                        seccompiler::apply_filter(&filter)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                        Ok(())
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!("seccomp filter build failed, running without: {e}");
+            }
+        }
     }
 
     let mut child = cmd

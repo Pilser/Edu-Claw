@@ -51,6 +51,29 @@ pub async fn touch_last_seen(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Er
     Ok(())
 }
 
+pub async fn update_student(
+    pool: &SqlitePool,
+    id: &str,
+    display_name: Option<&str>,
+    class_ids_json: Option<&str>,
+    password_hash: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    // Build a minimal update — only change fields that are provided.
+    if let Some(n) = display_name {
+        sqlx::query("UPDATE students SET display_name = ? WHERE id = ?")
+            .bind(n).bind(id).execute(pool).await?;
+    }
+    if let Some(c) = class_ids_json {
+        sqlx::query("UPDATE students SET class_ids = ? WHERE id = ?")
+            .bind(c).bind(id).execute(pool).await?;
+    }
+    if let Some(h) = password_hash {
+        sqlx::query("UPDATE students SET password_hash = ? WHERE id = ?")
+            .bind(h).bind(id).execute(pool).await?;
+    }
+    Ok(())
+}
+
 pub async fn set_uid_slot(
     pool: &SqlitePool,
     id: &str,

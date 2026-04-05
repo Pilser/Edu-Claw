@@ -22,6 +22,9 @@ pub enum AppError {
     #[error("unauthorized")]
     Unauthorized,
 
+    #[error("forbidden")]
+    Forbidden,
+
     #[error("session error: {0}")]
     Session(String),
 
@@ -38,6 +41,7 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()),
+            AppError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden".to_string()),
             AppError::Db(e) => {
                 tracing::error!("db error: {e}");
                 (

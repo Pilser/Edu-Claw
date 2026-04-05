@@ -4,3 +4,4 @@ pub mod eval_engine;
 pub mod shell_ns;
 pub mod student_context;
 pub mod student_files;
+pub mod teacher_broadcast;

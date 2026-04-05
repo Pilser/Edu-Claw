@@ -79,6 +79,17 @@ impl SessionBroker {
             .map(|e| e.last_input_at.load(Ordering::Relaxed))
     }
 
+    /// List all live entries as (session_id, last_input_at_secs).
+    /// Used by the admin API to show idle times without hitting the DB.
+    pub async fn list_entries(&self) -> Vec<(String, u64)> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, e)| (id.clone(), e.last_input_at.load(Ordering::Relaxed)))
+            .collect()
+    }
+
     /// Send raw bytes to the PTY (e.g. watchdog idle warning banner).
     /// Silently no-ops if the browser is disconnected or session is gone.
     pub async fn write_to_pty(&self, session_id: &str, data: Vec<u8>) {

@@ -7,6 +7,7 @@ mod auth;
 mod db;
 mod error;
 mod pty_bridge;
+mod security;
 mod session;
 
 use std::net::SocketAddr;
