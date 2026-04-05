@@ -32,6 +32,11 @@ pub struct Config {
     /// Shape: { student_id, username, display_name, role, class_ids, session_id }
     /// May be empty if running in admin / standalone mode.
     pub student_json: Option<String>,
+
+    /// Base URL of the educlaw-server REST API.
+    /// Shell MCP uses this to look up namespace_pid for nsenter.
+    /// Default: http://127.0.0.1:3000
+    pub server_url: String,
 }
 
 impl Config {
@@ -50,6 +55,8 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(384),
             student_json: std::env::var("EDUCLAW_STUDENT_JSON").ok(),
+            server_url: std::env::var("EDUCLAW_SERVER_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3000".to_string()),
         })
     }
 

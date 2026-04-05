@@ -17,9 +17,9 @@ use tracing::{error, info};
 use crate::config::{Config, StudentInfo};
 use crate::embedding::EmbeddingClient;
 use crate::search_index::SearchIndex;
-use crate::servers::{class_files, student_context, student_files};
+use crate::servers::{class_files, shell_ns, student_context, student_files};
 
-// ── Server state ──────────────────────────────────────────────────────────
+// ── Server state ─────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct EduclawMcpServer {
@@ -28,6 +28,7 @@ pub struct EduclawMcpServer {
     classes_root: String,
     students_root: String,
     student: Option<StudentInfo>,
+    config: Arc<Config>,
 }
 
 impl EduclawMcpServer {
@@ -45,15 +46,17 @@ impl EduclawMcpServer {
         Ok(Self {
             index,
             embedding,
-            classes_root: config.classes_root,
-            students_root: config.students_root,
+            classes_root: config.classes_root.clone(),
+            students_root: config.students_root.clone(),
             student,
+            config: Arc::new(config),
         })
     }
 
     fn all_tools(&self) -> Vec<Tool> {
         let mut tools = Vec::new();
         tools.extend(class_files::tools());
+        tools.extend(shell_ns::tools());
         tools.extend(student_context::tools());
         tools.extend(student_files::tools());
         tools
@@ -84,6 +87,10 @@ impl EduclawMcpServer {
             // StudentFiles
             "list_student_files" | "read_student_file" | "write_student_file" => {
                 student_files::call_tool(name, args, &self.students_root, &self.student)
+            }
+            // Shell-in-namespace
+            "run_command" | "run_python" => {
+                shell_ns::call_tool(name, args, &self.config).await
             }
             _ => Err(McpError::invalid_params(
                 format!("unknown tool: {name}"),

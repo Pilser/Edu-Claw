@@ -24,7 +24,7 @@ use crate::error::{AppError, Result};
 use crate::session::{
     broker::now_secs,
     dirs::SessionDirs,
-    namespace::{install_plugin, mount_overlay, umount_overlay},
+    namespace::{install_plugin, mount_overlay, umount_overlay, spawn_claw_session, SpawnParams},
     watchdog::{run_watchdog, WatchdogConfig},
 };
 
@@ -82,6 +82,19 @@ async fn create_session(
     let class_ids: Vec<String> =
         serde_json::from_str(&student.class_ids).unwrap_or_default();
 
+    // Build the student JSON blob injected into the session environment.
+    // claw's init.sh reads this to write the system prompt.
+    let student_json = serde_json::json!({
+        "student_id":   student.id,
+        "username":     student.username,
+        "display_name": student.display_name,
+        "role":         student.role,
+        "class_ids":    class_ids,
+        "session_id":   session_id,
+        "course":       body.course,
+        "assignment":   body.assignment,
+    }).to_string();
+
     // Persist session record
     let session = Session {
         id: session_id.clone(),
@@ -114,6 +127,36 @@ async fn create_session(
         Arc::clone(&state.broker),
         state.pool.clone(),
     ));
+
+    // Spawn claw inside an unshare namespace; record the PID for Shell MCP nsenter.
+    let mcp_socket = std::env::var("EDUCLAW_MCP_SOCKET")
+        .unwrap_or_else(|_| "127.0.0.1:9000".to_string());
+    let api_keys: Vec<(String, String)> = body
+        .api_keys
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let spawn_params = SpawnParams {
+        session_id: session_id.clone(),
+        student_json: student_json.clone(),
+        dirs: dirs.clone(),
+        claw_bin: std::env::var("CLAW_BIN").unwrap_or_else(|_| "claw".to_string()),
+        model: body.model.clone(),
+        env: {
+            let mut env = api_keys;
+            env.push(("EDUCLAW_MCP_SOCKET".to_string(), mcp_socket));
+            env
+        },
+    };
+    match spawn_claw_session(&spawn_params).await {
+        Ok(pid) => {
+            let _ = db_sess::set_namespace_pid(&state.pool, &session_id, pid as i64).await;
+            tracing::info!(session_id = %session_id, pid = pid, "claw namespace spawned");
+        }
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, error = %e, "claw spawn failed (PTY bridge will retry)");
+        }
+    }
 
     // Session-scoped JWT for the WebSocket handshake
     let token = state.auth.sign_session_token(
