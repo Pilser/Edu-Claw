@@ -18,13 +18,6 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
   export CLAW_MODEL
 fi
 
-# ── Satisfy claw's Anthropic startup gate ────────────────────────────────
-# claw always validates Anthropic credentials at startup before routing to
-# any provider. Setting a dummy ANTHROPIC_API_KEY satisfies that check.
-# It is never sent to xAI — the xAI client reads only XAI_API_KEY.
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-not-needed-using-xai}"
-# ────────────────────────────────────────────────────────────────────────
-
 # Default model to grok-3 unless --model is already in the args
 DEFAULT_MODEL="${CLAW_MODEL:-grok-3}"
 if [[ " $* " != *" --model "* ]]; then

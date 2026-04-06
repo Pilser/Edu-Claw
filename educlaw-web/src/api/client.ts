@@ -1,4 +1,6 @@
-import type { LoginResponse, Session, FileNode, AssignmentProgress } from './types'
+import type { LoginResponse, Session, FileNode, AssignmentProgress, Cohort, Subject, Assignment } from './types'
+
+const BASE = ''   // same origin
 
 const json = (res: Response) => {
   if (!res.ok) return res.text().then(t => Promise.reject(new Error(t || `HTTP ${res.status}`)))
@@ -6,65 +8,204 @@ const json = (res: Response) => {
 }
 
 export const api = {
+  // ── Auth ────────────────────────────────────────────────────────────────
+
   async login(username: string, password: string): Promise<LoginResponse> {
-    return fetch('/auth/login', {
+    return fetch(`${BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     }).then(json)
   },
 
-  async createSession(
-    studentId: string,
-    token: string,
-    course: string,
-    assignment?: string,
-  ): Promise<Session> {
-    const body: Record<string, string> = { student_id: studentId, course }
-    if (assignment) body.assignment = assignment
-    return fetch('/sessions', {
+  /** Bootstrap token — uses ADMIN_SECRET, not username/password */
+  async bootstrapToken(secret: string): Promise<{ token: string }> {
+    return fetch(`${BASE}/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    }).then(json)
+  },
+
+  // ── Sessions ─────────────────────────────────────────────────────────────
+
+  async createSession(studentId: string, token: string): Promise<Session> {
+    return fetch(`${BASE}/sessions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ student_id: studentId }),
     }).then(json)
   },
 
   async endSession(sessionId: string, token: string): Promise<void> {
-    await fetch(`/sessions/${sessionId}`, {
+    await fetch(`${BASE}/sessions/${sessionId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     })
   },
 
-  async listClassFiles(classId: string, token: string): Promise<FileNode[]> {
-    return fetch(`/files/class/${classId}`, {
+  // ── Files ────────────────────────────────────────────────────────────────
+
+  async listSubjectFiles(subjectId: string, token: string): Promise<FileNode[]> {
+    return fetch(`${BASE}/files/subject/${subjectId}/tree`, {
       headers: { Authorization: `Bearer ${token}` },
     }).then(json)
   },
 
   async listStudentFiles(sessionId: string, token: string): Promise<FileNode[]> {
-    return fetch(`/files/student/${sessionId}`, {
+    return fetch(`${BASE}/files/student/${sessionId}/tree`, {
       headers: { Authorization: `Bearer ${token}` },
     }).then(json)
   },
 
-  async getFileContent(path: string, token: string): Promise<string> {
-    return fetch(`/files/content?path=${encodeURIComponent(path)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then(r => r.text())
-  },
-
-  async getProgress(
-    sessionId: string,
-    token: string,
-  ): Promise<AssignmentProgress | null> {
-    const res = await fetch(`/sessions/${sessionId}/progress`, {
+  async getProgress(sessionId: string, token: string): Promise<AssignmentProgress | null> {
+    const res = await fetch(`${BASE}/sessions/${sessionId}/progress`, {
       headers: { Authorization: `Bearer ${token}` },
     })
     if (res.status === 404) return null
     return json(res)
   },
+
+  // ── Admin — Students ─────────────────────────────────────────────────────
+
+  async adminListStudents(token: string): Promise<AdminStudent[]> {
+    return fetch(`${BASE}/admin/students`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(json)
+  },
+
+  async adminCreateStudent(token: string, body: CreateStudentBody): Promise<{ id: string }> {
+    return fetch(`${BASE}/admin/students`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    }).then(json)
+  },
+
+  async adminUpdateStudent(token: string, id: string, body: UpdateStudentBody): Promise<void> {
+    await fetch(`${BASE}/admin/students/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    }).then(json)
+  },
+
+  // ── Admin — Sessions ─────────────────────────────────────────────────────
+
+  async adminListSessions(token: string): Promise<AdminSession[]> {
+    return fetch(`${BASE}/admin/sessions`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(json)
+  },
+
+  async adminTerminateSession(token: string, sessionId: string): Promise<void> {
+    await fetch(`${BASE}/admin/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  },
+
+  // ── Admin — Cohorts ──────────────────────────────────────────────────────
+
+  async adminListCohorts(token: string): Promise<Cohort[]> {
+    return fetch(`${BASE}/admin/cohorts`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(json)
+  },
+
+  async adminCreateCohort(token: string, title: string, subjectIds: string[]): Promise<{ id: string }> {
+    return fetch(`${BASE}/admin/cohorts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ title, subject_ids: subjectIds }),
+    }).then(json)
+  },
+
+  async adminSetCohortSubjects(token: string, cohortId: string, subjectIds: string[]): Promise<void> {
+    await fetch(`${BASE}/admin/cohorts/${cohortId}/subjects`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ subject_ids: subjectIds }),
+    })
+  },
+
+  // ── Admin — Subjects ─────────────────────────────────────────────────────
+
+  async adminListSubjects(token: string): Promise<Subject[]> {
+    return fetch(`${BASE}/admin/subjects`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(json)
+  },
+
+  async adminCreateSubject(token: string, title: string): Promise<{ id: string }> {
+    return fetch(`${BASE}/admin/subjects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ title }),
+    }).then(json)
+  },
+
+  // ── Admin — Assignments ──────────────────────────────────────────────────
+
+  async adminListAssignments(token: string, subjectId?: string): Promise<Assignment[]> {
+    const url = subjectId
+      ? `${BASE}/admin/assignments?subject_id=${encodeURIComponent(subjectId)}`
+      : `${BASE}/admin/assignments`
+    return fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(json)
+  },
+
+  async adminCreateAssignment(token: string, body: CreateAssignmentBody): Promise<{ id: string }> {
+    return fetch(`${BASE}/admin/assignments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    }).then(json)
+  },
 }
+
+// ── Admin types (only used by AdminPage) ─────────────────────────────────
+
+export interface AdminStudent {
+  id: string
+  username: string
+  display_name: string
+  role: string
+  cohort_id: string
+  last_seen: string | null
+  has_active_session: boolean
+}
+
+export interface AdminSession {
+  id: string
+  student_id: string
+  state: string
+  idle_secs: number | null
+  started_at: string
+}
+
+export interface CreateStudentBody {
+  username: string
+  password: string
+  display_name: string
+  role: 'student' | 'teacher' | 'admin'
+  cohort_id: string
+}
+
+export interface UpdateStudentBody {
+  display_name?: string
+  cohort_id?: string
+  new_password?: string
+}
+
+export interface CreateAssignmentBody {
+  subject_id: string
+  title: string
+  description?: string
+  due_date?: string
+}
+

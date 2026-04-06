@@ -1,7 +1,7 @@
 // educlaw-server/src/db/sessions.rs
 //
-// Session record: schema matches the plan.
-//   id, student_id, course, assignment, state, namespace_pid,
+// Session record.
+//   id, student_id, state, namespace_pid,
 //   overlay_mount, last_input_at, started_at, ended_at
 //
 // state values: active | idle_warning | terminating | ended
@@ -12,15 +12,13 @@ use sqlx::SqlitePool;
 pub struct Session {
     pub id: String,
     pub student_id: String,
-    pub course: String,
-    pub assignment: Option<String>,
     /// active | idle_warning | terminating | ended
     pub state: String,
     /// PID of init process inside the namespace (set after spawn).
     pub namespace_pid: Option<i64>,
     /// Absolute path to the OverlayFS merged mount point.
     pub overlay_mount: String,
-    /// Updated on every keypress; used by the idle watchdog (Phase 2).
+    /// Updated on every keypress; used by the idle watchdog.
     pub last_input_at: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
@@ -31,13 +29,11 @@ pub struct Session {
 pub async fn insert_session(pool: &SqlitePool, s: &Session) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO sessions
-             (id, student_id, course, assignment, state, overlay_mount)
-         VALUES (?, ?, ?, ?, ?, ?)",
+             (id, student_id, state, overlay_mount)
+         VALUES (?, ?, ?, ?)",
     )
     .bind(&s.id)
     .bind(&s.student_id)
-    .bind(&s.course)
-    .bind(&s.assignment)
     .bind(&s.state)
     .bind(&s.overlay_mount)
     .execute(pool)
@@ -83,7 +79,7 @@ pub async fn set_namespace_pid(
     Ok(())
 }
 
-/// Called on every keypress to reset idle timer (Phase 2 watchdog).
+/// Called on every keypress to reset idle timer.
 pub async fn touch_last_input(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE sessions SET last_input_at = datetime('now') WHERE id = ?",
@@ -110,3 +106,5 @@ pub async fn list_active_sessions(pool: &SqlitePool) -> Result<Vec<Session>, sql
     .fetch_all(pool)
     .await
 }
+
+

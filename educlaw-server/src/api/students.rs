@@ -36,8 +36,8 @@ struct CreateStudentRequest {
     display_name: String,
     /// "student" | "teacher" | "admin" — defaults to "student"
     role: Option<String>,
-    /// Enrolled class UUIDs — defaults to empty list
-    class_ids: Option<Vec<String>>,
+    /// Cohort this student belongs to
+    cohort_id: Option<String>,
 }
 
 async fn create_student(
@@ -45,8 +45,6 @@ async fn create_student(
     Json(body): Json<CreateStudentRequest>,
 ) -> Result<impl IntoResponse> {
     let password_hash = auth::hash_password(&body.password)?;
-    let class_ids_json = serde_json::to_string(&body.class_ids.unwrap_or_default())
-        .map_err(|e| AppError::Internal(e.into()))?;
 
     let student = Student {
         id: Uuid::new_v4().to_string(),
@@ -54,7 +52,7 @@ async fn create_student(
         password_hash,
         display_name: body.display_name,
         role: body.role.unwrap_or_else(|| "student".to_string()),
-        class_ids: class_ids_json,
+        cohort_id: body.cohort_id.unwrap_or_default(),
         uid_slot: None,
         created_at: String::new(), // set by DB DEFAULT
         last_seen: None,

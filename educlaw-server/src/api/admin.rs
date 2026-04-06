@@ -1,22 +1,32 @@
 // educlaw-server/src/api/admin.rs
 //
-// Admin REST API — Phase 5.1
+// Admin REST API
 //
-// All routes require a JWT with role == "admin".
-// Teacher-read routes additionally allow role == "teacher".
+// All routes require JWT role == "admin".
+// Read-only routes additionally allow role == "teacher".
 //
-// Endpoints (plan §11.1):
+// Students
 //   GET    /admin/students              — list all students + active-session flag
 //   POST   /admin/students              — create student account
-//   PUT    /admin/students/:id          — update class enrolments / reset password
+//   PUT    /admin/students/:id          — update display_name / cohort_id / password
+// Sessions
 //   GET    /admin/sessions              — live sessions with idle_secs
 //   DELETE /admin/sessions/:id          — force-terminate a session
-//   POST   /admin/classes               — create a class directory on disk
+// Cohorts
+//   GET    /admin/cohorts               — list all cohorts
+//   POST   /admin/cohorts               — create a cohort
+//   PUT    /admin/cohorts/:id/subjects  — set subject_ids JSON for a cohort
+// Subjects
+//   GET    /admin/subjects              — list all subjects
+//   POST   /admin/subjects              — create a subject (creates dir on disk)
+// Assignments
+//   GET    /admin/assignments?subject_id=  — list assignments (all, or filter by subject)
+//   POST   /admin/assignments              — create an assignment
 
 use std::path::Path;
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -26,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{bearer_token, hash_password, Claims};
-use crate::db::{sessions as db_sess, students};
+use crate::db::{assignments as db_assign, cohorts as db_cohorts, sessions as db_sess, students, subjects as db_subjects};
 use crate::error::{AppError, Result};
 use crate::session::broker::now_secs;
 
@@ -36,17 +46,23 @@ use super::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/admin/students",     get(list_students).post(create_student))
-        .route("/admin/students/{id}", put(update_student))
-        .route("/admin/sessions",     get(list_sessions))
-        .route("/admin/sessions/{id}", delete(terminate_session))
-        .route("/admin/classes",      post(create_class))
+        // Students
+        .route("/admin/students",          get(list_students).post(create_student))
+        .route("/admin/students/{id}",     put(update_student))
+        // Sessions
+        .route("/admin/sessions",          get(list_sessions))
+        .route("/admin/sessions/{id}",     delete(terminate_session))
+        // Cohorts
+        .route("/admin/cohorts",           get(list_cohorts).post(create_cohort))
+        .route("/admin/cohorts/{id}/subjects", put(set_cohort_subjects))
+        // Subjects
+        .route("/admin/subjects",          get(list_subjects_handler).post(create_subject))
+        // Assignments
+        .route("/admin/assignments",       get(list_assignments).post(create_assignment))
 }
 
 // ── Auth guard ────────────────────────────────────────────────────────────
 
-/// Extract and validate a Bearer JWT; returns Err(Unauthorized) if missing or
-/// invalid. Callers then check the role field themselves.
 fn claims(state: &AppState, headers: &HeaderMap) -> Result<Claims> {
     let token = bearer_token(headers).ok_or(AppError::Unauthorized)?;
     state.auth.verify(token)
@@ -60,7 +76,6 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<Claims> {
     Ok(c)
 }
 
-/// Admin or teacher — used for read-only operations.
 fn require_staff(state: &AppState, headers: &HeaderMap) -> Result<Claims> {
     let c = claims(state, headers)?;
     if c.role != "admin" && c.role != "teacher" {
@@ -77,7 +92,7 @@ struct StudentView {
     username: String,
     display_name: String,
     role: String,
-    class_ids: Vec<String>,
+    cohort_id: String,
     last_seen: Option<String>,
     has_active_session: bool,
 }
@@ -90,18 +105,10 @@ async fn list_students(
 
     let rows = students::list_students(&state.pool).await?;
 
-    // Collect session IDs that are live in the broker so we can mark active.
     let live: std::collections::HashSet<String> = state
-        .broker
-        .list_entries()
-        .await
-        .into_iter()
-        .map(|(sid, _)| sid)
-        .collect();
+        .broker.list_entries().await.into_iter().map(|(sid, _)| sid).collect();
 
-    // We need student_ids that have a live session.  Fetch active sessions once.
-    let active_sessions = db_sess::list_active_sessions(&state.pool)
-        .await?;
+    let active_sessions = db_sess::list_active_sessions(&state.pool).await?;
     let active_student_ids: std::collections::HashSet<String> = active_sessions
         .iter()
         .filter(|s| live.contains(&s.id))
@@ -110,18 +117,14 @@ async fn list_students(
 
     let views: Vec<StudentView> = rows
         .into_iter()
-        .map(|s| {
-            let class_ids: Vec<String> =
-                serde_json::from_str(&s.class_ids).unwrap_or_default();
-            StudentView {
-                has_active_session: active_student_ids.contains(&s.id),
-                id: s.id,
-                username: s.username,
-                display_name: s.display_name,
-                role: s.role,
-                class_ids,
-                last_seen: s.last_seen,
-            }
+        .map(|s| StudentView {
+            has_active_session: active_student_ids.contains(&s.id),
+            id: s.id,
+            username: s.username,
+            display_name: s.display_name,
+            role: s.role,
+            cohort_id: s.cohort_id,
+            last_seen: s.last_seen,
         })
         .collect();
 
@@ -136,7 +139,7 @@ struct CreateStudentBody {
     password: String,
     display_name: String,
     role: Option<String>,
-    class_ids: Option<Vec<String>>,
+    cohort_id: Option<String>,
 }
 
 async fn create_student(
@@ -147,8 +150,6 @@ async fn create_student(
     require_admin(&state, &headers)?;
 
     let password_hash = hash_password(&body.password)?;
-    let class_ids_json = serde_json::to_string(&body.class_ids.unwrap_or_default())
-        .map_err(|e| AppError::Internal(e.into()))?;
 
     let student = students::Student {
         id: Uuid::new_v4().to_string(),
@@ -156,14 +157,13 @@ async fn create_student(
         password_hash,
         display_name: body.display_name,
         role: body.role.unwrap_or_else(|| "student".to_string()),
-        class_ids: class_ids_json,
+        cohort_id: body.cohort_id.unwrap_or_default(),
         uid_slot: None,
         created_at: String::new(),
         last_seen: None,
     };
 
-    students::insert_student(&state.pool, &student)
-        .await?;
+    students::insert_student(&state.pool, &student).await?;
 
     tracing::info!(student_id = %student.id, username = %student.username, "admin: student created");
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": student.id }))))
@@ -174,8 +174,7 @@ async fn create_student(
 #[derive(Deserialize)]
 struct UpdateStudentBody {
     display_name: Option<String>,
-    class_ids: Option<Vec<String>>,
-    /// If present, password is reset to this value.
+    cohort_id: Option<String>,
     new_password: Option<String>,
 }
 
@@ -187,27 +186,17 @@ async fn update_student(
 ) -> Result<impl IntoResponse> {
     require_admin(&state, &headers)?;
 
-    // Verify student exists.
     students::get_student(&state.pool, &id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("student {id}")))?;
 
-    let class_ids_json = body
-        .class_ids
-        .as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_default());
-
-    let new_hash = body
-        .new_password
-        .as_deref()
-        .map(hash_password)
-        .transpose()?;
+    let new_hash = body.new_password.as_deref().map(hash_password).transpose()?;
 
     students::update_student(
         &state.pool,
         &id,
         body.display_name.as_deref(),
-        class_ids_json.as_deref(),
+        body.cohort_id.as_deref(),
         new_hash.as_deref(),
     )
     .await?;
@@ -222,8 +211,6 @@ async fn update_student(
 struct SessionView {
     id: String,
     student_id: String,
-    course: String,
-    assignment: Option<String>,
     state: String,
     namespace_pid: Option<i64>,
     idle_secs: Option<u64>,
@@ -236,10 +223,7 @@ async fn list_sessions(
 ) -> Result<impl IntoResponse> {
     require_staff(&state, &headers)?;
 
-    let db_sessions = db_sess::list_active_sessions(&state.pool)
-        .await?;
-
-    // Build a map of session_id → last_input_at from the in-memory broker.
+    let db_sessions = db_sess::list_active_sessions(&state.pool).await?;
     let live: std::collections::HashMap<String, u64> =
         state.broker.list_entries().await.into_iter().collect();
 
@@ -252,8 +236,6 @@ async fn list_sessions(
                 idle_secs,
                 id: s.id,
                 student_id: s.student_id,
-                course: s.course,
-                assignment: s.assignment,
                 state: s.state,
                 namespace_pid: s.namespace_pid,
                 started_at: s.started_at,
@@ -277,7 +259,6 @@ async fn terminate_session(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("session {id}")))?;
 
-    // Kill namespace process if PID is known.
     if let Some(pid) = session.namespace_pid {
         let _ = tokio::process::Command::new("kill")
             .args(["-TERM", &pid.to_string()])
@@ -285,14 +266,8 @@ async fn terminate_session(
             .await;
     }
 
-    // Unmount OverlayFS.
     crate::session::namespace::umount_overlay(std::path::Path::new(&session.overlay_mount)).await;
-
-    // Update DB state.
-    db_sess::set_session_state(&state.pool, &id, "ended")
-        .await?;
-
-    // Remove from broker.
+    db_sess::set_session_state(&state.pool, &id, "ended").await?;
     state.broker.remove_entry(&id).await;
     crate::security::cgroups::teardown_session_cgroup(&id).await;
 
@@ -300,60 +275,182 @@ async fn terminate_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── POST /admin/classes ───────────────────────────────────────────────────
+// ── GET /admin/cohorts ────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct CreateClassBody {
-    /// Short slug used as the directory name, e.g. "math101".
-    class_id: String,
-    /// Optional human-readable class title stored in a metadata file.
-    title: Option<String>,
-}
-
-async fn create_class(
+async fn list_cohorts(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<CreateClassBody>,
+) -> Result<impl IntoResponse> {
+    require_staff(&state, &headers)?;
+    let rows = db_cohorts::list_cohorts(&state.pool).await?;
+    Ok(Json(rows))
+}
+
+// ── POST /admin/cohorts ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateCohortBody {
+    title: String,
+    /// JSON array of subject UUIDs, e.g. ["id1","id2"].  Defaults to empty.
+    subject_ids: Option<Vec<String>>,
+}
+
+async fn create_cohort(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateCohortBody>,
 ) -> Result<impl IntoResponse> {
     require_admin(&state, &headers)?;
 
-    // Validate slug: alphanumeric + dashes/underscores only.
-    if body.class_id.is_empty()
-        || !body.class_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest("class_id must be alphanumeric (-, _ allowed)".into()));
-    }
+    let subject_ids_json = serde_json::to_string(&body.subject_ids.unwrap_or_default())
+        .map_err(|e| AppError::Internal(e.into()))?;
 
-    // Derive the class directory from workspace_root.
-    // Convention: {workspace_root}/../../classes/{class_id}
-    // But the actual root comes from EDUCLAW_CLASSES_ROOT env, falling back to sibling.
-    let classes_root = std::env::var("EDUCLAW_CLASSES_ROOT")
-        .unwrap_or_else(|_| "/srv/educlaw/data/classes".to_string());
-    let class_dir = Path::new(&classes_root).join(&body.class_id);
+    let cohort = db_cohorts::Cohort {
+        id: Uuid::new_v4().to_string(),
+        title: body.title,
+        subject_ids: subject_ids_json,
+        created_at: String::new(),
+    };
+    db_cohorts::insert_cohort(&state.pool, &cohort).await?;
 
-    if class_dir.exists() {
-        return Err(AppError::BadRequest(format!("class '{}' already exists", body.class_id)));
-    }
+    tracing::info!(cohort_id = %cohort.id, "admin: cohort created");
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": cohort.id }))))
+}
 
-    tokio::fs::create_dir_all(&class_dir)
+// ── PUT /admin/cohorts/:id/subjects ──────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SetCohortSubjectsBody {
+    subject_ids: Vec<String>,
+}
+
+async fn set_cohort_subjects(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<SetCohortSubjectsBody>,
+) -> Result<impl IntoResponse> {
+    require_admin(&state, &headers)?;
+
+    db_cohorts::get_cohort(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("cohort {id}")))?;
+
+    let json = serde_json::to_string(&body.subject_ids)
+        .map_err(|e| AppError::Internal(e.into()))?;
+    db_cohorts::update_cohort_subjects(&state.pool, &id, &json).await?;
+
+    tracing::info!(cohort_id = %id, "admin: cohort subjects updated");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── GET /admin/subjects ───────────────────────────────────────────────────
+
+async fn list_subjects_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    require_staff(&state, &headers)?;
+    let rows = db_subjects::list_subjects(&state.pool).await?;
+    Ok(Json(rows))
+}
+
+// ── POST /admin/subjects ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateSubjectBody {
+    title: String,
+}
+
+async fn create_subject(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateSubjectBody>,
+) -> Result<impl IntoResponse> {
+    require_admin(&state, &headers)?;
+
+    let subject = db_subjects::Subject {
+        id: Uuid::new_v4().to_string(),
+        title: body.title,
+        created_at: String::new(),
+    };
+    db_subjects::insert_subject(&state.pool, &subject).await?;
+
+    // Create the subject directory on disk.
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
+    let subject_dir = Path::new(&subjects_root).join(&subject.id);
+    tokio::fs::create_dir_all(&subject_dir)
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("create class dir: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("create subject dir: {e}")))?;
 
-    // Write a minimal class.json metadata file.
-    if let Some(title) = &body.title {
-        let meta = serde_json::json!({ "class_id": body.class_id, "title": title });
-        let meta_path = class_dir.join("class.json");
-        tokio::fs::write(&meta_path, meta.to_string())
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("write class.json: {e}")))?;
-    }
+    // Write a minimal subject.json metadata file.
+    let meta = serde_json::json!({ "id": subject.id, "title": subject.title });
+    tokio::fs::write(subject_dir.join("subject.json"), meta.to_string())
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("write subject.json: {e}")))?;
 
-    tracing::info!(class_id = %body.class_id, "admin: class created");
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "class_id": body.class_id,
-            "path": class_dir.display().to_string()
-        })),
-    ))
+    tracing::info!(subject_id = %subject.id, title = %subject.title, "admin: subject created");
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": subject.id }))))
+}
+
+// ── GET /admin/assignments?subject_id= ───────────────────────────────────
+
+#[derive(Deserialize)]
+struct ListAssignmentsQuery {
+    subject_id: Option<String>,
+}
+
+async fn list_assignments(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ListAssignmentsQuery>,
+) -> Result<impl IntoResponse> {
+    require_staff(&state, &headers)?;
+
+    let rows = match q.subject_id.as_deref() {
+        Some(sid) => db_assign::list_assignments_for_subject(&state.pool, sid).await?,
+        None => {
+            // Return all assignments — useful for admin overview
+            sqlx::query_as::<_, db_assign::Assignment>(
+                "SELECT * FROM assignments ORDER BY created_at DESC",
+            )
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
+
+    Ok(Json(rows))
+}
+
+// ── POST /admin/assignments ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateAssignmentBody {
+    subject_id: String,
+    title: String,
+    description: Option<String>,
+    due_date: Option<String>,
+}
+
+async fn create_assignment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateAssignmentBody>,
+) -> Result<impl IntoResponse> {
+    let c = require_staff(&state, &headers)?;
+
+    let assignment = db_assign::Assignment {
+        id: Uuid::new_v4().to_string(),
+        subject_id: body.subject_id,
+        title: body.title,
+        description: body.description.unwrap_or_default(),
+        due_date: body.due_date,
+        created_by: c.sub,
+        created_at: String::new(),
+    };
+    db_assign::insert_assignment(&state.pool, &assignment).await?;
+
+    tracing::info!(assignment_id = %assignment.id, "admin: assignment created");
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": assignment.id }))))
 }

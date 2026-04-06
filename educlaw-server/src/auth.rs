@@ -2,8 +2,8 @@
 //
 // JWT authentication and Argon2id password helpers.
 //
-// JWT payload (Claims) matches the plan:
-//   sub (student_id) + role + class_ids + optional session_id
+// JWT payload (Claims):
+//   sub (student_id) + role + cohort_id + subject_ids + optional session_id
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -36,24 +36,27 @@ impl AuthConfig {
         let claims = Claims {
             sub: "admin".to_string(),
             role: "admin".to_string(),
-            class_ids: vec![],
+            cohort_id: String::new(),
+            subject_ids: vec![],
             session_id: None,
             exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
         };
         Ok(encode(&Header::default(), &claims, &self.encoding_key)?)
     }
 
-    /// Student login token (8 h) — carries role + enrolled class_ids.
+    /// Student login token (8 h) — carries role + cohort_id + enrolled subject_ids.
     pub fn sign_student_token(
         &self,
         student_id: &str,
         role: &str,
-        class_ids: Vec<String>,
+        cohort_id: &str,
+        subject_ids: Vec<String>,
     ) -> anyhow::Result<String> {
         let claims = Claims {
             sub: student_id.to_string(),
             role: role.to_string(),
-            class_ids,
+            cohort_id: cohort_id.to_string(),
+            subject_ids,
             session_id: None,
             exp: (Utc::now() + Duration::hours(8)).timestamp() as usize,
         };
@@ -65,13 +68,15 @@ impl AuthConfig {
         &self,
         student_id: &str,
         role: &str,
-        class_ids: Vec<String>,
+        cohort_id: &str,
+        subject_ids: Vec<String>,
         session_id: &str,
     ) -> anyhow::Result<String> {
         let claims = Claims {
             sub: student_id.to_string(),
             role: role.to_string(),
-            class_ids,
+            cohort_id: cohort_id.to_string(),
+            subject_ids,
             session_id: Some(session_id.to_string()),
             exp: (Utc::now() + Duration::hours(8)).timestamp() as usize,
         };
@@ -88,15 +93,16 @@ impl AuthConfig {
 // ── JWT claims ────────────────────────────────────────────────────────────
 
 /// JWT payload carried by every token.
-/// Matches plan: student_id (sub) + role + class_ids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     /// student_id UUID or "admin"
     pub sub: String,
     /// "student" | "teacher" | "admin"
     pub role: String,
-    /// Enrolled class UUIDs; empty for admin tokens.
-    pub class_ids: Vec<String>,
+    /// Cohort the student belongs to; empty string for admin tokens.
+    pub cohort_id: String,
+    /// Subject UUIDs the cohort is enrolled in; empty for admin tokens.
+    pub subject_ids: Vec<String>,
     /// Present only on session-scoped tokens.
     pub session_id: Option<String>,
     /// Unix timestamp expiry.

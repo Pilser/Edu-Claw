@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load()?;
-    info!("config loaded — classes_root={}", config.classes_root);
+    info!("config loaded — subjects_root={}", config.subjects_root);
 
     let server = Arc::new(EduclawMcpServer::new(config).await?);
     info!("EduclawMcpServer ready");

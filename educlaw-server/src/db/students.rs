@@ -1,7 +1,7 @@
 // educlaw-server/src/db/students.rs
 //
-// Student record: schema matches the plan.
-//   id, username, password_hash, display_name, role, class_ids, uid_slot,
+// Student record.
+//   id, username, password_hash, display_name, role, cohort_id, uid_slot,
 //   created_at, last_seen
 
 use sqlx::SqlitePool;
@@ -16,8 +16,8 @@ pub struct Student {
     pub display_name: String,
     /// "student" | "teacher" | "admin"
     pub role: String,
-    /// JSON array of enrolled class UUIDs, e.g. '["uuid1","uuid2"]'
-    pub class_ids: String,
+    /// ID of the cohort this student belongs to (e.g. "primary-2b").
+    pub cohort_id: String,
     /// Host uid mapping while a session is active; NULL when idle.
     pub uid_slot: Option<i64>,
     pub created_at: String,
@@ -29,7 +29,7 @@ pub struct Student {
 pub async fn insert_student(pool: &SqlitePool, s: &Student) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO students
-             (id, username, password_hash, display_name, role, class_ids)
+             (id, username, password_hash, display_name, role, cohort_id)
          VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&s.id)
@@ -37,7 +37,7 @@ pub async fn insert_student(pool: &SqlitePool, s: &Student) -> Result<(), sqlx::
     .bind(&s.password_hash)
     .bind(&s.display_name)
     .bind(&s.role)
-    .bind(&s.class_ids)
+    .bind(&s.cohort_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -55,16 +55,15 @@ pub async fn update_student(
     pool: &SqlitePool,
     id: &str,
     display_name: Option<&str>,
-    class_ids_json: Option<&str>,
+    cohort_id: Option<&str>,
     password_hash: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    // Build a minimal update — only change fields that are provided.
     if let Some(n) = display_name {
         sqlx::query("UPDATE students SET display_name = ? WHERE id = ?")
             .bind(n).bind(id).execute(pool).await?;
     }
-    if let Some(c) = class_ids_json {
-        sqlx::query("UPDATE students SET class_ids = ? WHERE id = ?")
+    if let Some(c) = cohort_id {
+        sqlx::query("UPDATE students SET cohort_id = ? WHERE id = ?")
             .bind(c).bind(id).execute(pool).await?;
     }
     if let Some(h) = password_hash {
@@ -111,3 +110,4 @@ pub async fn list_students(pool: &SqlitePool) -> Result<Vec<Student>, sqlx::Erro
         .fetch_all(pool)
         .await
 }
+

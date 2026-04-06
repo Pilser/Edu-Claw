@@ -48,9 +48,9 @@ fn default_points() -> u32 {
 
 // ── Path ──────────────────────────────────────────────────────────────────
 
-pub fn spec_path(classes_root: &str, class_id: &str, assignment_id: &str) -> PathBuf {
-    PathBuf::from(classes_root)
-        .join(class_id)
+pub fn spec_path(subjects_root: &str, subject_id: &str, assignment_id: &str) -> PathBuf {
+    PathBuf::from(subjects_root)
+        .join(subject_id)
         .join("assignments")
         .join(assignment_id)
         .join("spec.json")
@@ -73,11 +73,11 @@ pub fn validate_slug(s: &str, label: &str) -> Result<String, McpError> {
 // ── Loading ───────────────────────────────────────────────────────────────
 
 pub fn load_spec(
-    classes_root: &str,
-    class_id: &str,
+    subjects_root: &str,
+    subject_id: &str,
     assignment_id: &str,
 ) -> Result<AssignmentSpec, McpError> {
-    let p = spec_path(classes_root, class_id, assignment_id);
+    let p = spec_path(subjects_root, subject_id, assignment_id);
     let raw = std::fs::read_to_string(&p).map_err(|e| {
         McpError::invalid_params(format!("cannot read spec for {assignment_id}: {e}"), None)
     })?;

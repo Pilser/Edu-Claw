@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::sessions::{self as db_sess, Session};
-use crate::db::students;
+use crate::db::{cohorts, students};
 use crate::auth::bearer_token;
 use crate::error::{AppError, Result};
 use crate::session::{
@@ -45,11 +45,7 @@ pub fn routes() -> Router<AppState> {
 #[derive(Deserialize)]
 struct CreateSessionRequest {
     student_id: String,
-    course: String,
-    assignment: Option<String>,
     model: Option<String>,
-    /// Extra env vars to forward into the session (e.g. API keys).
-    api_keys: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -81,29 +77,35 @@ async fn create_session(
     // Mount OverlayFS
     mount_overlay(&dirs).await?;
 
-    // Parse student class_ids for JWT
-    let class_ids: Vec<String> =
-        serde_json::from_str(&student.class_ids).unwrap_or_default();
+    // Resolve cohort → subject_ids for JWT
+    let subject_ids: Vec<String> = if student.cohort_id.is_empty() {
+        vec![]
+    } else {
+        match cohorts::get_cohort(&state.pool, &student.cohort_id).await? {
+            Some(c) => serde_json::from_str(&c.subject_ids).unwrap_or_default(),
+            None => vec![],
+        }
+    };
 
     // Build the student JSON blob injected into the session environment.
     // claw's init.sh reads this to write the system prompt.
+    // cohort_id and subject_ids are included for MCP access control,
+    // but init.sh must NOT include subject_ids in the system prompt
+    // (the agent discovers them on demand via tools).
     let student_json = serde_json::json!({
         "student_id":   student.id,
         "username":     student.username,
         "display_name": student.display_name,
         "role":         student.role,
-        "class_ids":    class_ids,
+        "cohort_id":    student.cohort_id,
+        "subject_ids":  subject_ids,
         "session_id":   session_id,
-        "course":       body.course,
-        "assignment":   body.assignment,
     }).to_string();
 
     // Persist session record
     let session = Session {
         id: session_id.clone(),
         student_id: student.id.clone(),
-        course: body.course.clone(),
-        assignment: body.assignment.clone(),
         state: "active".to_string(),
         namespace_pid: None,
         overlay_mount: dirs.merged.display().to_string(),
@@ -134,22 +136,23 @@ async fn create_session(
     // Spawn claw inside an unshare namespace; record the PID for Shell MCP nsenter.
     let mcp_socket = std::env::var("EDUCLAW_MCP_SOCKET")
         .unwrap_or_else(|_| "127.0.0.1:9000".to_string());
-    let api_keys: Vec<(String, String)> = body
-        .api_keys
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+
+    // Prefer request body model → CLAW_MODEL env → None (claw uses its own default).
+    let effective_model = body.model.clone()
+        .or_else(|| std::env::var("CLAW_MODEL").ok());
+    if effective_model.is_none() {
+        tracing::warn!("no model set in request or CLAW_MODEL env; claw will use its compiled default");
+    }
+
     let spawn_params = SpawnParams {
         session_id: session_id.clone(),
         student_json: student_json.clone(),
         dirs: dirs.clone(),
         claw_bin: std::env::var("CLAW_BIN").unwrap_or_else(|_| "claw".to_string()),
-        model: body.model.clone(),
-        env: {
-            let mut env = api_keys;
-            env.push(("EDUCLAW_MCP_SOCKET".to_string(), mcp_socket));
-            env
-        },
+        model: effective_model,
+        env: vec![
+            ("EDUCLAW_MCP_SOCKET".to_string(), mcp_socket),
+        ],
     };
     match spawn_claw_session(&spawn_params).await {
         Ok(pid) => {
@@ -167,7 +170,8 @@ async fn create_session(
     let token = state.auth.sign_session_token(
         &student.id,
         &student.role,
-        class_ids,
+        &student.cohort_id,
+        subject_ids,
         &session_id,
     )?;
 
@@ -177,7 +181,6 @@ async fn create_session(
     tracing::info!(
         session_id = %session_id,
         student    = %student.display_name,
-        course     = %body.course,
         "session created"
     );
 

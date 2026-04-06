@@ -5,11 +5,11 @@ import type { FileNode } from '../api/types'
 interface Props {
   token: string
   sessionId: string
-  classId: string
+  subjectId: string
   onFileSelect: (path: string, name: string) => void
 }
 
-type Tab = 'class' | 'mine'
+type Tab = 'subject' | 'mine'
 
 function FileRow({
   node,
@@ -65,8 +65,8 @@ function FileRow({
   )
 }
 
-export default function FileTree({ token, sessionId, classId, onFileSelect }: Props) {
-  const [tab, setTab]       = useState<Tab>('class')
+export default function FileTree({ token, sessionId, subjectId, onFileSelect }: Props) {
+  const [tab, setTab]       = useState<Tab>('subject')
   const [files, setFiles]   = useState<FileNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError]   = useState('')
@@ -74,21 +74,21 @@ export default function FileTree({ token, sessionId, classId, onFileSelect }: Pr
   useEffect(() => {
     setError('')
     setLoading(true)
-    const req = tab === 'class'
-      ? api.listClassFiles(classId, token)
+    const req = tab === 'subject'
+      ? api.listSubjectFiles(subjectId, token)
       : api.listStudentFiles(sessionId, token)
 
     req
       .then(setFiles)
       .catch(e => setError(e instanceof Error ? e.message : 'Failed to load files'))
       .finally(() => setLoading(false))
-  }, [tab, token, classId, sessionId])
+  }, [tab, token, subjectId, sessionId])
 
   return (
     <div className="flex flex-col h-full">
       {/* Tabs */}
       <div className="flex border-b border-slate-200 shrink-0">
-        {(['class', 'mine'] as Tab[]).map(t => (
+        {(['subject', 'mine'] as Tab[]).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -98,7 +98,7 @@ export default function FileTree({ token, sessionId, classId, onFileSelect }: Pr
                 : 'text-slate-500 hover:text-slate-700'
             }`}
           >
-            {t === 'class' ? '📚 Class' : '🗂 My Files'}
+            {t === 'subject' ? '📚 Subject' : '🗂 My Files'}
           </button>
         ))}
       </div>

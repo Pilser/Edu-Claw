@@ -2,10 +2,10 @@
 //
 // LanceDB-powered hybrid search index.
 //
-// Storage: a LanceDB table "class_chunks" at EDUCLAW_SEARCH_DB (directory path).
+// Storage: a LanceDB table "subject_chunks" at EDUCLAW_SEARCH_DB (directory path).
 //
 // Schema:
-//   class_id   TEXT   — class identifier (multi-tenant isolation)
+//   subject_id   TEXT   — class identifier (multi-tenant isolation)
 //   file_path  TEXT   — source file path (relative to class root)
 //   chunk_text TEXT   — raw text of the chunk (used for BM25 FTS)
 //   embedding  FLOAT[dim] — dense embedding vector
@@ -15,8 +15,8 @@
 //   IVF-HNSW-SQ on embedding — ANN vector index
 //
 // Search: vector KNN + BM25 full-text, merged with Reciprocal Rank Fusion.
-// Class isolation: SQL predicate filter `class_id = 'X'` on every query.
-// SQL injection: class_id is validated to [a-zA-Z0-9_-] before use in SQL.
+// Class isolation: SQL predicate filter `subject_id = 'X'` on every query.
+// SQL injection: subject_id is validated to [a-zA-Z0-9_-] before use in SQL.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ use tracing::{debug, info};
 
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
-    pub class_id: String,
+    pub subject_id: String,
     pub file_path: String,
     pub chunk_text: String,
     /// RRF relevance score — higher is more relevant (combines vector + BM25 ranks).
@@ -67,7 +67,7 @@ impl SearchIndex {
 
         // Create the table if it doesn't exist; open it if it does.
         let tbl = conn
-            .create_empty_table("class_chunks", schema)
+            .create_empty_table("subject_chunks", schema)
             .mode(CreateTableMode::exist_ok(|req| req))
             .execute()
             .await?;
@@ -81,14 +81,14 @@ impl SearchIndex {
     /// Insert one chunk and its embedding as a single Arrow row.
     pub async fn insert_chunk(
         &self,
-        class_id: String,
+        subject_id: String,
         file_path: String,
         chunk_text: String,
         embedding: Vec<f32>,
     ) -> anyhow::Result<()> {
         let schema = chunk_schema(self.dim);
 
-        let class_ids   = StringArray::from(vec![class_id]);
+        let subject_ids   = StringArray::from(vec![subject_id]);
         let file_paths  = StringArray::from(vec![file_path]);
         let chunk_texts = StringArray::from(vec![chunk_text]);
         let embeddings  = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
@@ -99,7 +99,7 @@ impl SearchIndex {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(class_ids),
+                Arc::new(subject_ids),
                 Arc::new(file_paths),
                 Arc::new(chunk_texts),
                 Arc::new(embeddings),
@@ -144,22 +144,22 @@ impl SearchIndex {
     /// Returns the number of rows deleted.
     pub async fn delete_chunks_for_file(
         &self,
-        class_id: &str,
+        subject_id: &str,
         file_path: &str,
     ) -> anyhow::Result<usize> {
-        sanitize_class_id(class_id)?;
+        sanitize_subject_id(subject_id)?;
         let safe_fp = file_path.replace('\'', "''");
 
         let before = self
             .tbl
             .count_rows(Some(format!(
-                "class_id = '{class_id}' AND file_path = '{safe_fp}'"
+                "subject_id = '{subject_id}' AND file_path = '{safe_fp}'"
             )))
             .await?;
 
         self.tbl
             .delete(&format!(
-                "class_id = '{class_id}' AND file_path = '{safe_fp}'"
+                "subject_id = '{subject_id}' AND file_path = '{safe_fp}'"
             ))
             .await?;
 
@@ -169,22 +169,22 @@ impl SearchIndex {
     // ── Read ──────────────────────────────────────────────────────────────
 
     /// Hybrid search: vector KNN + BM25 FTS combined with RRF reranker.
-    /// Results are filtered to `class_id` and ranked by relevance score (higher = better).
+    /// Results are filtered to `subject_id` and ranked by relevance score (higher = better).
     pub async fn hybrid_search(
         &self,
-        class_id: String,
+        subject_id: String,
         query_text: &str,
         query_embedding: Vec<f32>,
         limit: usize,
     ) -> anyhow::Result<Vec<SearchResult>> {
-        sanitize_class_id(&class_id)?;
+        sanitize_subject_id(&subject_id)?;
         let fts = FullTextSearchQuery::new(query_text.to_string());
 
         let batches: Vec<RecordBatch> = self
             .tbl
             .query()
             .full_text_search(fts)
-            .only_if(format!("class_id = '{class_id}'"))
+            .only_if(format!("subject_id = '{subject_id}'"))
             .limit(limit)
             .nearest_to(query_embedding.as_slice())?
             .execute()
@@ -196,7 +196,7 @@ impl SearchIndex {
         for batch in &batches {
             use arrow_array::cast::AsArray;
 
-            let class_ids   = batch.column_by_name("class_id").unwrap().as_string::<i32>();
+            let subject_ids   = batch.column_by_name("subject_id").unwrap().as_string::<i32>();
             let file_paths  = batch.column_by_name("file_path").unwrap().as_string::<i32>();
             let chunk_texts = batch.column_by_name("chunk_text").unwrap().as_string::<i32>();
 
@@ -208,7 +208,7 @@ impl SearchIndex {
 
             for i in 0..batch.num_rows() {
                 results.push(SearchResult {
-                    class_id:   class_ids.value(i).to_string(),
+                    subject_id:   subject_ids.value(i).to_string(),
                     file_path:  file_paths.value(i).to_string(),
                     chunk_text: chunk_texts.value(i).to_string(),
                     score:      scores[i] as f64,
@@ -220,13 +220,13 @@ impl SearchIndex {
     }
 
     /// Return all unique file paths indexed for a class.
-    pub async fn indexed_files(&self, class_id: &str) -> anyhow::Result<Vec<String>> {
-        sanitize_class_id(class_id)?;
+    pub async fn indexed_files(&self, subject_id: &str) -> anyhow::Result<Vec<String>> {
+        sanitize_subject_id(subject_id)?;
 
         let batches: Vec<RecordBatch> = self
             .tbl
             .query()
-            .only_if(format!("class_id = '{class_id}'"))
+            .only_if(format!("subject_id = '{subject_id}'"))
             .select(Select::columns(&["file_path"]))
             .execute()
             .await?
@@ -250,10 +250,10 @@ impl SearchIndex {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/// Build the Arrow schema for the class_chunks table.
+/// Build the Arrow schema for the subject_chunks table.
 fn chunk_schema(dim: usize) -> Arc<Schema> {
     Arc::new(Schema::new(vec![
-        Field::new("class_id",   DataType::Utf8, false),
+        Field::new("subject_id",   DataType::Utf8, false),
         Field::new("file_path",  DataType::Utf8, false),
         Field::new("chunk_text", DataType::Utf8, false),
         Field::new(
@@ -267,9 +267,9 @@ fn chunk_schema(dim: usize) -> Arc<Schema> {
     ]))
 }
 
-/// Validate a class_id or student_id: only alphanumerics, `-`, and `_` allowed.
+/// Validate a subject_id or student_id: only alphanumerics, `-`, and `_` allowed.
 /// This prevents SQL injection in LanceDB predicate strings.
-fn sanitize_class_id(s: &str) -> anyhow::Result<()> {
+fn sanitize_subject_id(s: &str) -> anyhow::Result<()> {
     if s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
         Ok(())
     } else {

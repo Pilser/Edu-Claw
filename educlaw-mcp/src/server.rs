@@ -17,7 +17,7 @@ use tracing::{error, info};
 use crate::config::{Config, StudentInfo};
 use crate::embedding::EmbeddingClient;
 use crate::search_index::SearchIndex;
-use crate::servers::{class_files, eval_engine, shell_ns, student_context, student_files, teacher_broadcast};
+use crate::servers::{assignments, eval_engine, shell_ns, student_context, student_files, subject_files, teacher_broadcast};
 
 // ── Server state ─────────────────────────────────────────────
 
@@ -25,7 +25,7 @@ use crate::servers::{class_files, eval_engine, shell_ns, student_context, studen
 pub struct EduclawMcpServer {
     index: Arc<SearchIndex>,
     embedding: Arc<EmbeddingClient>,
-    classes_root: String,
+    subjects_root: String,
     students_root: String,
     student: Option<StudentInfo>,
     config: Arc<Config>,
@@ -46,7 +46,7 @@ impl EduclawMcpServer {
         Ok(Self {
             index,
             embedding,
-            classes_root: config.classes_root.clone(),
+            subjects_root: config.subjects_root.clone(),
             students_root: config.students_root.clone(),
             student,
             config: Arc::new(config),
@@ -55,11 +55,12 @@ impl EduclawMcpServer {
 
     fn all_tools(&self) -> Vec<Tool> {
         let mut tools = Vec::new();
-        tools.extend(class_files::tools());
+        tools.extend(assignments::tools());
         tools.extend(eval_engine::tools());
         tools.extend(shell_ns::tools());
         tools.extend(student_context::tools());
         tools.extend(student_files::tools());
+        tools.extend(subject_files::tools());
         tools.extend(teacher_broadcast::tools());
         tools
     }
@@ -70,18 +71,22 @@ impl EduclawMcpServer {
         args: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
         match name {
-            // ClassFiles
-            "list_class_files" | "read_class_file" | "search_class_content"
-            | "index_class_file" => {
-                class_files::call_tool(
+            // SubjectFiles
+            "list_subject_files" | "read_subject_file" | "search_subject_content"
+            | "index_subject_file" => {
+                subject_files::call_tool(
                     name,
                     args,
-                    &self.classes_root,
+                    &self.subjects_root,
                     &self.index,
                     &self.embedding,
                     &self.student,
                 )
                 .await
+            }
+            // Assignments (teacher-created, agent reads on demand)
+            "list_assignments" | "get_assignment" => {
+                assignments::call_tool(name, args, &self.student, &self.config).await
             }
             // StudentContext
             "get_student_context" => {
@@ -91,22 +96,20 @@ impl EduclawMcpServer {
             "list_student_files" | "read_student_file" | "write_student_file" => {
                 student_files::call_tool(name, args, &self.students_root, &self.student)
             }
-            // EvalEngine
-            "list_assignments" | "get_assignment"
-            | "record_answer" | "get_progress" | "submit_assignment" => {
+            // EvalEngine (quiz-style grading; uses subjects_root not classes_root)
+            "record_answer" | "get_progress" | "submit_assignment" => {
                 eval_engine::call_tool(
                     name,
                     args,
-                    &self.classes_root,
+                    &self.subjects_root,
                     &self.students_root,
                     &self.student,
                 )
             }
-            // check_answer uses async AI grading for essay-type questions
             "check_answer" => {
                 eval_engine::check_answer_async(
                     args,
-                    &self.classes_root,
+                    &self.subjects_root,
                     &self.student,
                 ).await
             }
@@ -156,8 +159,8 @@ impl ServerHandler for EduclawMcpServer {
                 website_url: None,
             },
             instructions: Some(
-                "EduClaw MCP server — provides class materials, student context, \
-                 and semantic search over course content."
+                "EduClaw MCP server — provides subject materials, student context, \
+                 assignments, and semantic search over subject content."
                     .to_string(),
             ),
         })

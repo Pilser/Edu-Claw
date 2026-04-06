@@ -10,7 +10,6 @@ import type { LoginResponse, Session, ShowImagePayload, ChatMessage } from '../a
 interface Props {
   auth: LoginResponse
   session: Session
-  course: string
   onEnd: () => void
 }
 
@@ -38,7 +37,7 @@ function StatusDot({ status }: { status: WsStatus }) {
 let msgCounter = 0
 function nextId() { return `msg-${++msgCounter}` }
 
-export default function SessionPage({ auth, session, course, onEnd }: Props) {
+export default function SessionPage({ auth, session, onEnd }: Props) {
   const [sidebarOpen, setSidebarOpen]           = useState(true)
   const [rightPanelOpen, setRightPanelOpen]     = useState(true)
   const [terminalOpen, setTerminalOpen]         = useState(false)
@@ -128,7 +127,7 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
         </div>
 
         <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">
-          {course}
+          {auth.subject_ids[0] ?? 'open'}
         </span>
 
         <StatusDot status={status} />
@@ -181,7 +180,7 @@ export default function SessionPage({ auth, session, course, onEnd }: Props) {
               <FileTree
                 token={session.token}
                 sessionId={session.session_id}
-                classId={course}
+                subjectId={auth.subject_ids[0] ?? ''}
                 onFileSelect={(_path, name) => { console.info('file selected:', name) }}
               />
             </div>

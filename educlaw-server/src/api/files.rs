@@ -1,28 +1,27 @@
 // educlaw-server/src/api/files.rs
 //
-// File browser REST API — Phase 4.1
+// File browser REST API
 //
 // Endpoints:
-//   GET  /files/class/:class_id              — list class materials tree
-//   GET  /files/class/:class_id/*path        — read a class file
-//   GET  /files/student/:session_id          — list student workspace tree
-//   GET  /files/student/:session_id/*path    — read a student file
-//   PUT  /files/student/:session_id/*path    — write a student file
-//   DELETE /files/student/:session_id/*path  — delete a student file
-//   GET  /files/content?path=<abs>           — (internal) raw content by abs path
+//   GET  /files/subject/:subject_id              — list subject materials tree
+//   GET  /files/subject/:subject_id/read?path=   — read a subject file
+//   GET  /files/student/:session_id/tree         — list student workspace tree
+//   GET  /files/student/:session_id/read?path=   — read a student file
+//   PUT  /files/student/:session_id/write?path=  — write a student file
+//   DELETE /files/student/:session_id/delete?path= — delete a student file
 //
 // Auth:
 //   All routes require a valid Bearer JWT.
-//   Class routes: student must be enrolled in the class
-//     (class_ids from JWT) OR be a teacher.
-//   Student routes: session_id in path must match the JWT's session_id claim
+//   Subject routes: student's cohort must include the subject_id
+//     (subject_ids from JWT) OR be a teacher.
+//   Student routes: session_id in path must match JWT's session_id claim
 //     OR caller is a teacher.
 
 use std::path::{Path, PathBuf};
 
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, put},
@@ -40,17 +39,14 @@ use super::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        // Class materials
-        .route("/files/class/{class_id}",       get(list_class))
-        .route("/files/class/{class_id}/{*path}", get(read_class_file))
+        // Subject materials
+        .route("/files/subject/{subject_id}/tree", get(list_subject_files))
+        .route("/files/subject/{subject_id}/read", get(read_subject_file))
         // Student workspace
-        .route("/files/student/{session_id}",        get(list_student))
-        .route(
-            "/files/student/{session_id}/{*path}",
-            get(read_student_file)
-                .put(write_student_file)
-                .delete(delete_student_file),
-        )
+        .route("/files/student/{session_id}/tree",   get(list_student))
+        .route("/files/student/{session_id}/read",   get(read_student_file))
+        .route("/files/student/{session_id}/write",  put(write_student_file))
+        .route("/files/student/{session_id}/delete", delete(delete_student_file))
 }
 
 // ── Shared types ──────────────────────────────────────────────────────────
@@ -100,7 +96,7 @@ fn normalize_path(p: &Path) -> PathBuf {
     out
 }
 
-/// Validate a class_id or session_id slug — alphanumeric + dash + underscore only.
+/// Validate a subject_id or session_id slug — alphanumeric + dash + underscore only.
 fn validate_id(s: &str, label: &str) -> Result<String> {
     if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
         Ok(s.to_string())
@@ -195,40 +191,47 @@ fn mime_guess(path: &Path) -> &'static str {
     }
 }
 
-// ── Class routes ──────────────────────────────────────────────────────────
+// ── Subject routes ────────────────────────────────────────────────────────
 
-async fn list_class(
+#[derive(Deserialize)]
+struct PathQuery {
+    path: Option<String>,
+}
+
+async fn list_subject_files(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    AxumPath(class_id): AxumPath<String>,
+    AxumPath(subject_id): AxumPath<String>,
 ) -> Result<Json<Vec<FileNode>>> {
     let claims = require_claims(&state, &headers)?;
-    let class_id = validate_id(&class_id, "class_id")?;
-    assert_class_access(&claims, &class_id)?;
+    let subject_id = validate_id(&subject_id, "subject_id")?;
+    assert_subject_access(&claims, &subject_id)?;
 
-    let classes_root = std::env::var("EDUCLAW_CLASSES_ROOT")
-        .unwrap_or_else(|_| "/data/classes".to_string());
-    let base = PathBuf::from(&classes_root).join(&class_id);
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/data/subjects".to_string());
+    let base = PathBuf::from(&subjects_root).join(&subject_id);
 
     if !base.exists() {
-        return Err(AppError::NotFound(format!("class {class_id} not found")));
+        return Err(AppError::NotFound(format!("subject {subject_id} not found")));
     }
 
     Ok(Json(build_tree(&base, "")))
 }
 
-async fn read_class_file(
+async fn read_subject_file(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    AxumPath((class_id, rel_path)): AxumPath<(String, String)>,
+    AxumPath(subject_id): AxumPath<String>,
+    Query(q): Query<PathQuery>,
 ) -> Result<Response> {
+    let rel_path = q.path.ok_or_else(|| AppError::BadRequest("missing ?path= query param".into()))?;
     let claims = require_claims(&state, &headers)?;
-    let class_id = validate_id(&class_id, "class_id")?;
-    assert_class_access(&claims, &class_id)?;
+    let subject_id = validate_id(&subject_id, "subject_id")?;
+    assert_subject_access(&claims, &subject_id)?;
 
-    let classes_root = std::env::var("EDUCLAW_CLASSES_ROOT")
-        .unwrap_or_else(|_| "/data/classes".to_string());
-    let base = PathBuf::from(&classes_root).join(&class_id);
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/data/subjects".to_string());
+    let base = PathBuf::from(&subjects_root).join(&subject_id);
     let path = safe_join(&base, &rel_path)?;
 
     file_response(&path)
@@ -257,8 +260,10 @@ async fn list_student(
 async fn read_student_file(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    AxumPath((session_id, rel_path)): AxumPath<(String, String)>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(q): Query<PathQuery>,
 ) -> Result<Response> {
+    let rel_path = q.path.ok_or_else(|| AppError::BadRequest("missing ?path= query param".into()))?;
     let claims = require_claims(&state, &headers)?;
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
@@ -276,9 +281,11 @@ struct WriteBody {
 async fn write_student_file(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    AxumPath((session_id, rel_path)): AxumPath<(String, String)>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(q): Query<PathQuery>,
     Json(body): Json<WriteBody>,
 ) -> Result<impl IntoResponse> {
+    let rel_path = q.path.ok_or_else(|| AppError::BadRequest("missing ?path= query param".into()))?;
     let claims = require_claims(&state, &headers)?;
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
@@ -296,8 +303,10 @@ async fn write_student_file(
 async fn delete_student_file(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    AxumPath((session_id, rel_path)): AxumPath<(String, String)>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(q): Query<PathQuery>,
 ) -> Result<impl IntoResponse> {
+    let rel_path = q.path.ok_or_else(|| AppError::BadRequest("missing ?path= query param".into()))?;
     let claims = require_claims(&state, &headers)?;
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
@@ -316,11 +325,11 @@ async fn delete_student_file(
 
 // ── Access control ────────────────────────────────────────────────────────
 
-fn assert_class_access(claims: &Claims, class_id: &str) -> Result<()> {
+fn assert_subject_access(claims: &Claims, subject_id: &str) -> Result<()> {
     if claims.role == "teacher" || claims.role == "admin" {
         return Ok(());
     }
-    if claims.class_ids.iter().any(|c| c == class_id) {
+    if claims.subject_ids.iter().any(|s| s == subject_id) {
         Ok(())
     } else {
         Err(AppError::Unauthorized)

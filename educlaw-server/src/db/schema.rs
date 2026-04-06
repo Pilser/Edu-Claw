@@ -6,7 +6,45 @@
 use sqlx::SqlitePool;
 
 pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
-    // ── students ─────────────────────────────────────────────────────────────
+    // ── cohorts ───────────────────────────────────────────────────────────────
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS cohorts (
+            id          TEXT PRIMARY KEY,
+            title       TEXT NOT NULL,
+            subject_ids TEXT NOT NULL DEFAULT '[]',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ── subjects ──────────────────────────────────────────────────────────────
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS subjects (
+            id         TEXT PRIMARY KEY,
+            title      TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ── assignments ───────────────────────────────────────────────────────────
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS assignments (
+            id          TEXT PRIMARY KEY,
+            subject_id  TEXT NOT NULL REFERENCES subjects(id),
+            title       TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            due_date    TEXT,
+            created_by  TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ── students ──────────────────────────────────────────────────────────────
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS students (
             id             TEXT PRIMARY KEY,
@@ -14,7 +52,7 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
             password_hash  TEXT NOT NULL,
             display_name   TEXT NOT NULL,
             role           TEXT NOT NULL DEFAULT 'student',
-            class_ids      TEXT NOT NULL DEFAULT '[]',
+            cohort_id      TEXT NOT NULL DEFAULT '',
             uid_slot       INTEGER,
             created_at     TEXT NOT NULL DEFAULT (datetime('now')),
             last_seen      TEXT
@@ -23,13 +61,11 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // ── sessions (ephemeral audit) ────────────────────────────────────────────
+    // ── sessions ──────────────────────────────────────────────────────────────
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
             id              TEXT PRIMARY KEY,
             student_id      TEXT NOT NULL REFERENCES students(id),
-            course          TEXT NOT NULL,
-            assignment      TEXT,
             state           TEXT NOT NULL DEFAULT 'active',
             namespace_pid   INTEGER,
             overlay_mount   TEXT NOT NULL,
@@ -49,6 +85,12 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_assignments_subject ON assignments(subject_id)",
     )
     .execute(pool)
     .await?;

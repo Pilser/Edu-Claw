@@ -1,6 +1,6 @@
 // eval_engine/mod.rs — MCP tool definitions and call_tool dispatch.
 //
-// Assignment specs: {classes_root}/{class_id}/assignments/{assignment_id}/spec.json
+// Assignment specs: {subjects_root}/{subject_id}/assignments/{assignment_id}/spec.json
 // Student progress: {students_root}/{student_id}/upper/.educlaw_evals/{assignment_id}/
 //
 // Security contract: expected answers and rubric keywords are loaded here but
@@ -35,9 +35,9 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "class_id": { "type": "string", "description": "Class identifier" }
+                    "subject_id": { "type": "string", "description": "Class identifier" }
                 },
-                "required": ["class_id"]
+                "required": ["subject_id"]
             }),
         ),
         crate::make_tool(
@@ -48,10 +48,10 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "class_id":      { "type": "string" },
+                    "subject_id":      { "type": "string" },
                     "assignment_id": { "type": "string" }
                 },
-                "required": ["class_id", "assignment_id"]
+                "required": ["subject_id", "assignment_id"]
             }),
         ),
         crate::make_tool(
@@ -62,7 +62,7 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "class_id":      { "type": "string" },
+                    "subject_id":      { "type": "string" },
                     "assignment_id": { "type": "string" },
                     "question_id":   {
                         "type": "string",
@@ -73,7 +73,7 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
                         "description": "Student's answer: number as string, choice label, or essay text"
                     }
                 },
-                "required": ["class_id", "assignment_id", "question_id", "answer"]
+                "required": ["subject_id", "assignment_id", "question_id", "answer"]
             }),
         ),
         crate::make_tool(
@@ -84,12 +84,12 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "class_id":      { "type": "string" },
+                    "subject_id":      { "type": "string" },
                     "assignment_id": { "type": "string" },
                     "question_id":   { "type": "string" },
                     "answer":        { "type": "string" }
                 },
-                "required": ["class_id", "assignment_id", "question_id", "answer"]
+                "required": ["subject_id", "assignment_id", "question_id", "answer"]
             }),
         ),
         crate::make_tool(
@@ -99,10 +99,10 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "class_id":      { "type": "string" },
+                    "subject_id":      { "type": "string" },
                     "assignment_id": { "type": "string" }
                 },
-                "required": ["class_id", "assignment_id"]
+                "required": ["subject_id", "assignment_id"]
             }),
         ),
         crate::make_tool(
@@ -112,10 +112,10 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "class_id":      { "type": "string" },
+                    "subject_id":      { "type": "string" },
                     "assignment_id": { "type": "string" }
                 },
-                "required": ["class_id", "assignment_id"]
+                "required": ["subject_id", "assignment_id"]
             }),
         ),
     ]
@@ -126,7 +126,7 @@ pub fn tools() -> Vec<rmcp::model::Tool> {
 pub fn call_tool(
     name: &str,
     args: &serde_json::Map<String, Value>,
-    classes_root: &str,
+    subjects_root: &str,
     students_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
@@ -138,12 +138,12 @@ pub fn call_tool(
     };
 
     match name {
-        "list_assignments"  => handle_list_assignments(str_arg, classes_root, student),
-        "get_assignment"    => handle_get_assignment(str_arg, classes_root, student),
-        "check_answer"      => handle_check_answer(str_arg, classes_root, student),
-        "record_answer"     => handle_record_answer(str_arg, classes_root, students_root, student),
-        "get_progress"      => handle_get_progress(str_arg, classes_root, students_root, student),
-        "submit_assignment" => handle_submit(str_arg, classes_root, students_root, student),
+        "list_assignments"  => handle_list_assignments(str_arg, subjects_root, student),
+        "get_assignment"    => handle_get_assignment(str_arg, subjects_root, student),
+        "check_answer"      => handle_check_answer(str_arg, subjects_root, student),
+        "record_answer"     => handle_record_answer(str_arg, subjects_root, students_root, student),
+        "get_progress"      => handle_get_progress(str_arg, subjects_root, students_root, student),
+        "submit_assignment" => handle_submit(str_arg, subjects_root, students_root, student),
         _ => Err(McpError::invalid_params(format!("unknown eval tool: {name}"), None)),
     }
 }
@@ -152,13 +152,13 @@ pub fn call_tool(
 
 fn handle_list_assignments(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
-    classes_root: &str,
+    subjects_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
-    let class_id = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?;
-    let dir = PathBuf::from(classes_root).join(&class_id).join("assignments");
+    s.assert_subject_access(&subject_id)?;
+    let dir = PathBuf::from(subjects_root).join(&subject_id).join("assignments");
 
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| McpError::invalid_params(format!("cannot list assignments: {e}"), None))?;
@@ -170,7 +170,7 @@ fn handle_list_assignments(
             let id = e.file_name().to_string_lossy().to_string();
             // Validate slug before loading to prevent path traversal
             validate_slug(&id, "assignment_id").ok()?;
-            let spec = load_spec(classes_root, &class_id, &id).ok()?;
+            let spec = load_spec(subjects_root, &subject_id, &id).ok()?;
             let max: u32 = spec.questions.iter().map(|q| q.points).sum();
             Some(json!({
                 "assignment_id": spec.assignment_id,
@@ -194,14 +194,14 @@ fn handle_list_assignments(
 
 fn handle_get_assignment(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
-    classes_root: &str,
+    subjects_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
-    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id      = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?;
-    let spec = load_spec(classes_root, &class_id, &assignment_id)?;
+    s.assert_subject_access(&subject_id)?;
+    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
 
     // Strip expected answers and rubric before returning
     let questions: Vec<Value> = spec
@@ -231,24 +231,24 @@ fn handle_get_assignment(
 
 fn handle_check_answer(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
-    classes_root: &str,
+    subjects_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
-    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id      = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let question_id   = str_arg("question_id")?;
     let answer        = str_arg("answer")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?;
+    s.assert_subject_access(&subject_id)?;
 
-    let spec = load_spec(classes_root, &class_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
     let q = spec
         .questions
         .iter()
         .find(|q| q.id == question_id)
         .ok_or_else(|| McpError::invalid_params(format!("question `{question_id}` not found"), None))?;
 
-    debug!("check_answer class={class_id} assignment={assignment_id} q={question_id}");
+    debug!("check_answer class={subject_id} assignment={assignment_id} q={question_id}");
 
     let out = check_answer(q, &answer);
     let mut result = json!({ "correct": out.correct, "score": out.score, "max_points": q.points });
@@ -260,7 +260,7 @@ fn handle_check_answer(
 /// when `EDUCLAW_AI_GRADING=1` is set. Falls back to keyword matching otherwise.
 pub async fn check_answer_async(
     args: &serde_json::Map<String, Value>,
-    classes_root: &str,
+    subjects_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
     let str_arg = |key: &str| -> Result<String, McpError> {
@@ -269,21 +269,21 @@ pub async fn check_answer_async(
             .map(str::to_string)
             .ok_or_else(|| McpError::invalid_params(format!("missing `{key}`"), None))
     };
-    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id      = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let question_id   = str_arg("question_id")?;
     let answer        = str_arg("answer")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?;
+    s.assert_subject_access(&subject_id)?;
 
-    let spec = load_spec(classes_root, &class_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
     let q = spec
         .questions
         .iter()
         .find(|q| q.id == question_id)
         .ok_or_else(|| McpError::invalid_params(format!("question `{question_id}` not found"), None))?;
 
-    debug!("check_answer_async class={class_id} assignment={assignment_id} q={question_id}");
+    debug!("check_answer_async class={subject_id} assignment={assignment_id} q={question_id}");
 
     let out = if q.kind == "essay" {
         grade_essay_ai(q, &answer).await
@@ -297,16 +297,16 @@ pub async fn check_answer_async(
 
 fn handle_record_answer(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
-    classes_root: &str,
+    subjects_root: &str,
     students_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
-    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id      = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let question_id   = str_arg("question_id")?;
     let answer        = str_arg("answer")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?;
+    s.assert_subject_access(&subject_id)?;
 
     if submitted_path(students_root, &s.student_id, &assignment_id).exists() {
         return Err(McpError::invalid_params(
@@ -315,7 +315,7 @@ fn handle_record_answer(
         ));
     }
 
-    let spec = load_spec(classes_root, &class_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
     let q = spec
         .questions
         .iter()
@@ -342,15 +342,15 @@ fn handle_record_answer(
 
 fn handle_get_progress(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
-    classes_root: &str,
+    subjects_root: &str,
     students_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
-    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id      = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?
-;    let spec      = load_spec(classes_root, &class_id, &assignment_id)?;;
+    s.assert_subject_access(&subject_id)?
+;    let spec      = load_spec(subjects_root, &subject_id, &assignment_id)?;;
     let af        = load_answers(students_root, &s.student_id, &assignment_id);
     let submitted = submitted_path(students_root, &s.student_id, &assignment_id).exists();
 
@@ -388,21 +388,21 @@ fn handle_get_progress(
 
 fn handle_submit(
     str_arg: impl Fn(&str) -> Result<String, McpError>,
-    classes_root: &str,
+    subjects_root: &str,
     students_root: &str,
     student: &Option<StudentInfo>,
 ) -> Result<CallToolResult, McpError> {
-    let class_id      = validate_slug(&str_arg("class_id")?, "class_id")?;
+    let subject_id      = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
-    s.assert_class_access(&class_id)?;
+    s.assert_subject_access(&subject_id)?;
 
     let sub_p = submitted_path(students_root, &s.student_id, &assignment_id);
     if sub_p.exists() {
         return Err(McpError::invalid_params("assignment already submitted", None));
     }
 
-    let spec = load_spec(classes_root, &class_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
     let af   = load_answers(students_root, &s.student_id, &assignment_id);
 
     let mut total = 0u32;
@@ -426,7 +426,7 @@ fn handle_submit(
 
     let doc = json!({
         "assignment_id": assignment_id,
-        "class_id": class_id,
+        "subject_id": subject_id,
         "student_id": s.student_id,
         "submitted_at": chrono::Utc::now().to_rfc3339(),
         "total_score": total,
@@ -443,7 +443,7 @@ fn handle_submit(
 
     tracing::info!(
         student_id = %s.student_id,
-        class_id = %class_id,
+        subject_id = %subject_id,
         assignment_id = %assignment_id,
         total_score = total,
         max_score = max,

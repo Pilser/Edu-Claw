@@ -5,6 +5,8 @@ export interface LoginResponse {
   student_id: string
   display_name: string
   role: string
+  cohort_id: string
+  subject_ids: string[]
 }
 
 export interface Session {
@@ -67,3 +69,28 @@ export interface ChatMessage {
   text: string        // accumulated markdown text
   pending: boolean    // true while still streaming
 }
+
+// Admin entity shapes
+export interface Cohort {
+  id: string
+  title: string
+  subject_ids: string  // JSON array from server
+  created_at: string
+}
+
+export interface Subject {
+  id: string
+  title: string
+  created_at: string
+}
+
+export interface Assignment {
+  id: string
+  subject_id: string
+  title: string
+  description: string
+  due_date: string | null
+  created_by: string
+  created_at: string
+}
+
