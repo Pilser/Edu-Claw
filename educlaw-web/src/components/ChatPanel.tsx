@@ -3,7 +3,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import type { ChatMessage } from '../api/types'
+import type { ChatMessage, MessageSegment } from '../api/types'
+import ToolCallCard from './ToolCallCard'
 
 interface Props {
   messages: ChatMessage[]
@@ -13,9 +14,51 @@ interface Props {
   disabled: boolean
 }
 
+// Convert claw's box-drawing code examples to proper markdown fenced blocks.
+// Pattern: ╭─ lang\n...content...\n╰─  →  ```lang\n...content...\n```
+function fixClawCodeBoxes(text: string): string {
+  return text.replace(/╭─ ([\w-]+)\n([\s\S]*?)╰─/g, (_m, lang: string, body: string) => {
+    return '```' + lang + '\n' + body + '```'
+  })
+}
+
+// Shared code-block renderer for ReactMarkdown.
+const mdCode = ({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'>) => {
+  const match = /language-(\w+)/.exec(className ?? '')
+  if (match) {
+    return (
+      <SyntaxHighlighter
+        style={oneDark}
+        language={match[1]}
+        PreTag="div"
+        customStyle={{ borderRadius: '0.5rem', fontSize: '0.78rem', margin: '0.5rem 0' }}
+      >
+        {String(children).replace(/\n$/, '')}
+      </SyntaxHighlighter>
+    )
+  }
+  return <code className={className} {...props}>{children}</code>
+}
+
+// Renders one segment: tool card or markdown text.
+function SegmentView({ seg }: { seg: MessageSegment }) {
+  if (seg.kind === 'tool') return <ToolCallCard seg={seg} />
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: mdCode }}>
+      {fixClawCodeBoxes(seg.content)}
+    </ReactMarkdown>
+  )
+}
+
 // A single message bubble.
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   const isUser = msg.role === 'user'
+  const userText = isUser
+    ? msg.segments
+        .filter((s): s is Extract<MessageSegment, { kind: 'text' }> => s.kind === 'text')
+        .map(s => s.content)
+        .join('')
+    : ''
 
   return (
     <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : 'flex-row'} items-start`}>
@@ -32,37 +75,13 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
           : 'bg-white border border-slate-200 text-slate-800 rounded-tl-sm'
         }`}>
         {isUser ? (
-          <p className="whitespace-pre-wrap">{msg.text}</p>
+          <p className="whitespace-pre-wrap">{userText}</p>
         ) : (
           <div className="prose prose-sm max-w-none prose-pre:p-0 prose-code:text-violet-700 prose-code:bg-violet-50 prose-code:px-1 prose-code:rounded">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                code({ className, children, ...props }) {
-                  const match = /language-(\w+)/.exec(className ?? '')
-                  const isBlock = match !== null
-                  if (isBlock) {
-                    return (
-                      <SyntaxHighlighter
-                        style={oneDark}
-                        language={match[1]}
-                        PreTag="div"
-                        customStyle={{ borderRadius: '0.5rem', fontSize: '0.78rem', margin: '0.5rem 0' }}
-                      >
-                        {String(children).replace(/\n$/, '')}
-                      </SyntaxHighlighter>
-                    )
-                  }
-                  return (
-                    <code className={className} {...props}>
-                      {children}
-                    </code>
-                  )
-                },
-              }}
-            >
-              {msg.text}
-            </ReactMarkdown>
+            {msg.segments.length === 0 && msg.pending && (
+              <span className="inline-block w-1.5 h-4 bg-violet-400 animate-pulse rounded-sm align-middle" />
+            )}
+            {msg.segments.map((seg, i) => <SegmentView key={i} seg={seg} />)}
             {msg.pending && (
               <span className="inline-block w-1.5 h-4 bg-violet-400 animate-pulse ml-0.5 rounded-sm align-middle" />
             )}

@@ -150,15 +150,166 @@ fn strip_ansi(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Returns true when claw has finished its turn and is back at the REPL prompt.
-///
-/// In pipe (non-TTY) mode, Spinner::finish writes "✔ ✨ Done\n" and the REPL
-/// loop calls read_line_fallback which writes "> " and flushes before blocking
-/// on stdin. So the last bytes we see before claw goes silent are "> ".
-///
-/// We confirm with "✨ Done" to avoid false triggers from "> " inside AI text.
-fn is_turn_complete(text: &str) -> bool {
-    text.contains("\u{2728} Done") && text.ends_with("> ")
+// ---------------------------------------------------------------------------
+// Structured output parser
+// Converts claw's pipe-mode stdout into typed WebSocket frames:
+//   tool_start  { tool, command }
+//   tool_result { text }   — streamed stdout from the tool
+//   tool_end    { exit_code }
+//   assistant_text { text }
+//   chat_end
+// ---------------------------------------------------------------------------
+
+/// Parser state for one user turn.
+#[derive(Default)]
+enum ParseState {
+    #[default]
+    Idle,
+    /// Inside ╭─ tool ─╮ header box, accumulating command lines.
+    InHeader { tool: String, cmds: Vec<String> },
+    /// After ╰──╯, waiting for the ✓ / ✗ status line.
+    AfterClose { tool: String, command: String },    /// Collecting tool stdout lines (after ✓/✗ status until next tool or Done).
+    InOutput { tool: String, command: String, exit_code: i32 },}
+
+/// "╭─ bash ─╮" → Some("bash"), otherwise None.
+fn parse_tool_header_start(line: &str) -> Option<String> {
+    let s = line.trim();
+    let rest = s.strip_prefix("╭─ ")?;
+    let tool = rest.strip_suffix(" ─╮")?.trim();
+    if tool.is_empty() { return None; }
+    Some(tool.to_string())
+}
+
+/// "✓ bash exit_code:127" / "✗ bash" → Some(exit_code), None otherwise.
+fn parse_tool_status(line: &str) -> Option<i32> {
+    let s = line.trim();
+    let (is_ok, rest) = if let Some(r) = s.strip_prefix('✓') {
+        (true, r.trim())
+    } else if let Some(r) = s.strip_prefix('✗') {
+        (false, r.trim())
+    } else {
+        return None;
+    };
+    if let Some(pos) = rest.find("exit_code:") {
+        let digits: String = rest[pos + "exit_code:".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        Some(digits.parse().unwrap_or(if is_ok { 0 } else { 1 }))
+    } else {
+        Some(if is_ok { 0 } else { 1 })
+    }
+}
+
+/// True for spinner / REPL-prompt noise lines that should be dropped.
+fn is_noise_line(line: &str) -> bool {
+    let s = line
+        .trim_start_matches(|c: char| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✔ ".contains(c))
+        .trim();
+    s.contains("🦀 Thinking")
+        || s.starts_with("claw v")
+        || line.trim() == ">"
+        || line.trim() == "> "
+}
+
+/// Process one complete line via the state machine.
+/// Returns (vec_of_json_strings, turn_is_complete).
+fn process_chat_line(state: &mut ParseState, raw: &str) -> (Vec<String>, bool) {
+    let line = raw.trim_end_matches('\r');
+    let mut msgs: Vec<String> = Vec::new();
+
+    // ✨ Done anywhere in the line — turn complete.
+    if line.contains('\u{2728}') && line.contains("Done") {
+        // Close any currently-open tool before signalling chat_end.
+        if let ParseState::InOutput { exit_code, .. } = state {
+            let code = *exit_code;
+            msgs.push(
+                serde_json::json!({ "type": "tool_end", "exit_code": code }).to_string(),
+            );
+        }
+        if let Some((before, _)) = line.split_once('\u{2728}') {
+            let text = before.trim_end_matches(|c: char| "✔ ".contains(c));
+            if !text.trim().is_empty() {
+                msgs.push(
+                    serde_json::json!({ "type": "assistant_text", "text": format!("{text}\n") })
+                        .to_string(),
+                );
+            }
+        }
+        msgs.push(r#"{"type":"chat_end"}"#.to_string());
+        *state = ParseState::Idle;
+        return (msgs, true);
+    }
+
+    if is_noise_line(line) {
+        return (msgs, false);
+    }
+
+    match state {
+        ParseState::Idle => {
+            if let Some(tool) = parse_tool_header_start(line) {
+                *state = ParseState::InHeader { tool, cmds: Vec::new() };
+            } else {
+                msgs.push(
+                    serde_json::json!({ "type": "assistant_text", "text": format!("{line}\n") })
+                        .to_string(),
+                );
+            }
+        }
+        ParseState::InHeader { tool, cmds } => {
+            if line.trim_start().starts_with('╰') {
+                let tool_name = tool.clone();
+                let command = cmds
+                    .iter()
+                    .map(|s| s.trim_start_matches(|c: char| c == '$' || c == ' '))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                *state = ParseState::AfterClose { tool: tool_name, command };
+            } else if let Some(body) = line.split_once('│') {
+                cmds.push(body.1.trim_start().to_string());
+            }
+        }
+        ParseState::AfterClose { tool, command } => {
+            if line.trim().is_empty() {
+                return (msgs, false);
+            }
+            let tool_name = tool.clone();
+            let cmd = command.clone();
+            if let Some(code) = parse_tool_status(line) {
+                // Status line: emit tool_start now, collect stdout in InOutput.
+                msgs.push(
+                    serde_json::json!({ "type": "tool_start", "tool": tool_name.clone(), "command": cmd.clone() })
+                        .to_string(),
+                );
+                *state = ParseState::InOutput { tool: tool_name, command: cmd, exit_code: code };
+            } else {
+                // Not a status line — treat as assistant text, reset to Idle.
+                *state = ParseState::Idle;
+                msgs.push(
+                    serde_json::json!({ "type": "assistant_text", "text": format!("{line}\n") })
+                        .to_string(),
+                );
+            }
+        }
+        ParseState::InOutput { exit_code, .. } => {
+            // A new tool header closes the current tool.
+            if let Some(new_tool) = parse_tool_header_start(line) {
+                let code = *exit_code;
+                msgs.push(
+                    serde_json::json!({ "type": "tool_end", "exit_code": code }).to_string(),
+                );
+                *state = ParseState::InHeader { tool: new_tool, cmds: Vec::new() };
+            } else if !line.trim().is_empty() {
+                // Stream tool stdout line to the frontend.
+                msgs.push(
+                    serde_json::json!({ "type": "tool_result", "text": format!("{line}\n") })
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    (msgs, false)
 }
 
 /// Map an image file extension to a MIME type for the data-URL.
@@ -266,14 +417,16 @@ pub async fn run_pty_session(
         let mut reader = tokio::io::BufReader::new(child_stdout);
         let mut raw_buf = [0u8; 4096];
         let mut osc_buf: Vec<u8> = Vec::new();
-        // Accumulates ANSI-stripped text for the current turn, used for
-        // end-of-turn detection.
-        let mut chat_clean_buf = String::new();
+        // Line buffer + state machine for structured chat output.
+        let mut line_buf = String::new();
+        let mut parse_state = ParseState::Idle;
 
         'outer: loop {
             tokio::select! {
-                // Forward chat control frames (chat_start) sent by the input loop.
+                // Forward chat_start; reset parser so each new turn starts clean.
                 Some(ctrl_msg) = ctrl_rx.recv() => {
+                    parse_state = ParseState::Idle;
+                    line_buf.clear();
                     if ws_sender.send(Message::Text(ctrl_msg)).await.is_err() {
                         break 'outer;
                     }
@@ -298,38 +451,41 @@ pub async fn run_pty_session(
                         break 'outer;
                     }
 
-                    // Chat panel routing while a turn is active.
+                    // Structured chat routing: parse line-by-line into typed WS frames.
                     if chat_active_out.load(Ordering::Relaxed) && !clean.is_empty() {
                         let raw_str = String::from_utf8_lossy(&clean).into_owned();
-                        let text_chunk = strip_ansi(&raw_str);
+                        line_buf.push_str(&strip_ansi(&raw_str));
 
-                        if !text_chunk.is_empty() {
-                            chat_clean_buf.push_str(&text_chunk);
-
-                            // Stream the stripped chunk to the chat panel.
-                            let frame = serde_json::json!({
-                                "type": "chat_text",
-                                "text": text_chunk,
-                            });
-                            if let Ok(json) = serde_json::to_string(&frame) {
+                        let mut turn_done = false;
+                        while let Some(nl) = line_buf.find('\n') {
+                            let line = line_buf[..nl].to_string();
+                            line_buf.drain(..=nl);
+                            let (out_msgs, done) =
+                                process_chat_line(&mut parse_state, &line);
+                            for json in out_msgs {
                                 if ws_sender.send(Message::Text(json)).await.is_err() {
                                     break 'outer;
                                 }
                             }
-
-                            // Detect turn completion and notify the frontend.
-                            if is_turn_complete(&chat_clean_buf) {
+                            if done {
+                                turn_done = true;
                                 chat_active_out.store(false, Ordering::Relaxed);
-                                chat_clean_buf.clear();
-                                if ws_sender
-                                    .send(Message::Text(
-                                        r#"{"type":"chat_end"}"#.to_string(),
-                                    ))
-                                    .await
-                                    .is_err()
-                                {
-                                    break 'outer;
-                                }
+                                break;
+                            }
+                        }
+                        // Fallback: bare REPL prompt (">") arrives without a newline.
+                        if !turn_done
+                            && chat_active_out.load(Ordering::Relaxed)
+                            && line_buf.trim() == ">"
+                        {
+                            line_buf.clear();
+                            chat_active_out.store(false, Ordering::Relaxed);
+                            if ws_sender
+                                .send(Message::Text(r#"{"type":"chat_end"}"#.to_string()))
+                                .await
+                                .is_err()
+                            {
+                                break 'outer;
                             }
                         }
                     }

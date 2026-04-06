@@ -9,11 +9,14 @@ interface Options {
   onPtyData: (data: Uint8Array) => void
   onImage: (p: ShowImagePayload) => void
   onChatStart?: () => void
-  onChatText?: (text: string) => void
+  onToolStart?: (tool: string, command: string) => void
+  onToolResult?: (text: string) => void
+  onToolEnd?: (exitCode: number) => void
+  onAssistantText?: (text: string) => void
   onChatEnd?: () => void
 }
 
-export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart, onChatText, onChatEnd }: Options) {
+export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart, onToolStart, onToolResult, onToolEnd, onAssistantText, onChatEnd }: Options) {
   const [status, setStatus] = useState<WsStatus>('connecting')
   const wsRef = useRef<WebSocket | null>(null)
   const keepaliveRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -65,7 +68,10 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart
       } else {
         // JSON control frame from server
         try {
-          const frame = JSON.parse(e.data as string) as { type: string; text?: string; payload?: unknown }
+          const frame = JSON.parse(e.data as string) as {
+            type: string; text?: string; tool?: string; command?: string;
+            exit_code?: number; payload?: unknown
+          }
           switch (frame.type) {
             case 'show_image':
               onImage(frame.payload as ShowImagePayload)
@@ -73,8 +79,17 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart
             case 'chat_start':
               onChatStart?.()
               break
-            case 'chat_text':
-              if (frame.text) onChatText?.(frame.text)
+            case 'tool_start':
+              onToolStart?.(frame.tool ?? '', frame.command ?? '')
+              break
+            case 'tool_result':
+              if (frame.text) onToolResult?.(frame.text)
+              break
+            case 'tool_end':
+              onToolEnd?.(typeof frame.exit_code === 'number' ? frame.exit_code : 0)
+              break
+            case 'assistant_text':
+              if (frame.text) onAssistantText?.(frame.text)
               break
             case 'chat_end':
               onChatEnd?.()
@@ -97,7 +112,7 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart
       ws.close()
       if (keepaliveRef.current) clearInterval(keepaliveRef.current)
     }
-  }, [sessionId, token, onPtyData, onImage, onChatStart, onChatText, onChatEnd])
+  }, [sessionId, token, onPtyData, onImage, onChatStart, onToolStart, onToolResult, onToolEnd, onAssistantText, onChatEnd])
 
   return { status, sendInput, sendResize }
 }

@@ -73,15 +73,72 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
     const id = nextId()
     pendingMsgIdRef.current = id
     setAiTyping(true)
-    setMessages(prev => [...prev, { id, role: 'assistant', text: '', pending: true }])
+    setMessages(prev => [...prev, { id, role: 'assistant', segments: [], pending: true }])
   }, [])
 
-  const handleChatText = useCallback((text: string) => {
+  const handleToolStart = useCallback((tool: string, command: string) => {
     const id = pendingMsgIdRef.current
     if (!id) return
     setMessages(prev => prev.map(m =>
-      m.id === id ? { ...m, text: m.text + text } : m
+      m.id === id
+        ? { ...m, segments: [...m.segments, { kind: 'tool' as const, tool, command, exitCode: 0, done: false, output: '' }] }
+        : m
     ))
+  }, [])
+
+  const handleToolResult = useCallback((text: string) => {
+    const id = pendingMsgIdRef.current
+    if (!id) return
+    setMessages(prev => prev.map(m => {
+      if (m.id !== id) return m
+      const lastIdx = m.segments.reduce<number>(
+        (acc, seg, i) => (seg.kind === 'tool' && !seg.done ? i : acc), -1
+      )
+      if (lastIdx === -1) return m
+      const segs = m.segments.map((seg, i) => {
+        if (i === lastIdx && seg.kind === 'tool') {
+          return { kind: 'tool' as const, tool: seg.tool, command: seg.command, exitCode: seg.exitCode, done: false, output: seg.output + text }
+        }
+        return seg
+      })
+      return { ...m, segments: segs }
+    }))
+  }, [])
+
+  const handleToolEnd = useCallback((exitCode: number) => {
+    const id = pendingMsgIdRef.current
+    if (!id) return
+    setMessages(prev => prev.map(m => {
+      if (m.id !== id) return m
+      // Update the last undone tool segment.
+      const lastIdx = m.segments.reduce<number>(
+        (acc, seg, i) => (seg.kind === 'tool' && !seg.done ? i : acc), -1
+      )
+      if (lastIdx === -1) return m
+      const segs = m.segments.map((seg, i) => {
+        if (i === lastIdx && seg.kind === 'tool') {
+          return { kind: 'tool' as const, tool: seg.tool, command: seg.command, exitCode, done: true, output: seg.output }
+        }
+        return seg
+      })
+      return { ...m, segments: segs }
+    }))
+  }, [])
+
+  const handleAssistantText = useCallback((text: string) => {
+    const id = pendingMsgIdRef.current
+    if (!id) return
+    setMessages(prev => prev.map(m => {
+      if (m.id !== id) return m
+      const segs = [...m.segments]
+      const last = segs[segs.length - 1]
+      if (last && last.kind === 'text') {
+        segs[segs.length - 1] = { kind: 'text' as const, content: last.content + text }
+      } else {
+        segs.push({ kind: 'text' as const, content: text })
+      }
+      return { ...m, segments: segs }
+    }))
   }, [])
 
   const handleChatEnd = useCallback(() => {
@@ -96,18 +153,26 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
   }, [])
 
   const { status, sendInput, sendResize } = useWebSocket({
-    sessionId:    session.session_id,
-    token:        session.token,
-    onPtyData:    handlePtyData,
-    onImage:      handleImage,
-    onChatStart:  handleChatStart,
-    onChatText:   handleChatText,
-    onChatEnd:    handleChatEnd,
+    sessionId:       session.session_id,
+    token:           session.token,
+    onPtyData:       handlePtyData,
+    onImage:         handleImage,
+    onChatStart:     handleChatStart,
+    onToolStart:     handleToolStart,
+    onToolResult:    handleToolResult,
+    onToolEnd:       handleToolEnd,
+    onAssistantText: handleAssistantText,
+    onChatEnd:       handleChatEnd,
   })
 
   // Patch handleSend to use the real sendInput (avoid closure ordering issue)
   const handleSendWithWs = useCallback((text: string) => {
-    setMessages(prev => [...prev, { id: nextId(), role: 'user', text, pending: false }])
+    setMessages(prev => [...prev, {
+      id: nextId(),
+      role: 'user',
+      segments: [{ kind: 'text' as const, content: text }],
+      pending: false,
+    }])
     sendInput(text + '\n')
   }, [sendInput])
 

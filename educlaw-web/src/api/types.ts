@@ -27,7 +27,10 @@ export type WsEnvelopeType =
   | 'file_change'
   | 'progress_update'
   | 'chat_start'
-  | 'chat_text'
+  | 'tool_start'
+  | 'tool_result'
+  | 'tool_end'
+  | 'assistant_text'
   | 'chat_end'
 
 export interface WsEnvelope {
@@ -63,10 +66,14 @@ export interface QuestionProgress {
 // Chat panel message types
 export type ChatRole = 'user' | 'assistant'
 
+export type MessageSegment =
+  | { kind: 'text'; content: string }
+  | { kind: 'tool'; tool: string; command: string; exitCode: number; done: boolean; output: string }
+
 export interface ChatMessage {
   id: string
   role: ChatRole
-  text: string        // accumulated markdown text
+  segments: MessageSegment[]
   pending: boolean    // true while still streaming
 }
 
