@@ -22,12 +22,25 @@ use crate::session::broker::SessionBroker;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+    let dotenv_result = dotenvy::dotenv();
 
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    // ── startup env diagnostics ──
+    match &dotenv_result {
+        Ok(path) => tracing::info!(path = %path.display(), "dotenv loaded"),
+        Err(e)   => tracing::warn!(error = %e, "dotenv NOT loaded — running on OS environment only"),
+    }
+    tracing::info!(
+        xai_key    = std::env::var("XAI_API_KEY").is_ok(),
+        claw_model = ?std::env::var("CLAW_MODEL").ok(),
+        claw_bin   = ?std::env::var("CLAW_BIN").ok(),
+        cwd        = %std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+        "startup env"
+    );
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://educlaw.db?mode=rwc".to_string());

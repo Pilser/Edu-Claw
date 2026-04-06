@@ -189,7 +189,6 @@ pub async fn run_pty_session(
     claw_bin: PathBuf,
     workspace: PathBuf,
     config_home: PathBuf,
-    plugin_dir: PathBuf,
     env_vars: Vec<(String, String)>,
     model: Option<String>,
     last_input_at: Arc<AtomicU64>,
@@ -207,13 +206,20 @@ pub async fn run_pty_session(
         cmd.arg("--model");
         cmd.arg(m);
     }
-    cmd.arg("--add-dir");
-    cmd.arg(plugin_dir.display().to_string());
     cmd.cwd(&workspace);
     cmd.env("CLAW_CONFIG_HOME", config_home.display().to_string());
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
+
+    // ── DEBUG: log what we're about to exec ───────────────────────────────
+    tracing::info!(
+        bin  = %claw_bin.display(),
+        model = ?model,
+        workspace = %workspace.display(),
+        xai_key_forwarded = env_vars.iter().any(|(k,_)| k == "XAI_API_KEY"),
+        "PTY: spawning claw"
+    );
 
     let mut child = pty_pair
         .slave

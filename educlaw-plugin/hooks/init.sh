@@ -99,8 +99,19 @@ if mcp_socket:
 
 os.makedirs(config_home, exist_ok=True)
 settings_path = os.path.join(config_home, "settings.json")
+
+# Merge into the existing settings.json (the server pre-writes externalDirectories there).
+# We add our keys without touching keys the server already set.
+try:
+    with open(settings_path) as fh:
+        existing = json.load(fh)
+except (FileNotFoundError, json.JSONDecodeError):
+    existing = {}
+
+existing.update(settings)
+
 with open(settings_path, "w") as fh:
-    json.dump(settings, fh, indent=2)
+    json.dump(existing, fh, indent=2)
 
 print(f"EduClaw: session settings written to {settings_path}")
 PYEOF

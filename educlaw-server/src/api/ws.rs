@@ -71,19 +71,45 @@ async fn session_ws(
         let (broker_tx, broker_rx) = mpsc::channel::<Vec<u8>>(32);
         broker.set_pty_sender(&sid, Some(broker_tx)).await;
 
-        let env_vars = vec![
+        let mut env_vars = vec![
             ("EDUCLAW_SESSION_ID".to_string(), sid.clone()),
             ("EDUCLAW_WORKSPACE".to_string(), dirs.merged.display().to_string()),
         ];
+
+        // portable_pty::CommandBuilder spawns with an empty environment.
+        // Forward the essential vars the child process needs.
+        for key in &[
+            "HOME", "USER", "PATH", "TERM",
+            "XAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+            "GEMINI_API_KEY", "GOOGLE_API_KEY", "MISTRAL_API_KEY",
+            "GROQ_API_KEY", "OPENAI_BASE_URL",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                env_vars.push((key.to_string(), val));
+            }
+        }
+
+        // Use CLAW_MODEL env var as default model; overridable per-session in the future.
+        let model = std::env::var("CLAW_MODEL").ok();
+
+        // ── DEBUG: log exactly what we are about to pass to claw ──────────
+        tracing::debug!(session_id = %sid, model = ?model, "PTY spawn: model resolved");
+        let forwarded_keys: Vec<&str> = env_vars.iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        tracing::debug!(session_id = %sid, keys = ?forwarded_keys, "PTY spawn: env keys forwarded");
+        let xai_present = env_vars.iter().any(|(k, _)| k == "XAI_API_KEY");
+        let anthropic_present = env_vars.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY");
+        tracing::info!(session_id = %sid, model = ?model, xai_key = xai_present, anthropic_key = anthropic_present, "PTY spawn: credentials check");
+        // ──────────────────────────────────────────────────────────────────
 
         if let Err(e) = run_pty_session(
             socket,
             claw_bin.into(),
             dirs.merged.clone(),
             dirs.config.clone(),
-            dirs.plugin.clone(),
             env_vars,
-            None,
+            model,
             last_input_at,
             broker_rx,
         )

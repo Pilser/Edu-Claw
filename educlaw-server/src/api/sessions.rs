@@ -70,9 +70,34 @@ async fn create_session(
     dirs.create_all()
         .map_err(|e| AppError::Session(format!("failed to create session dirs: {e}")))?;
 
-    // Per-session plugin copy (init.sh will write settings.json into config/)
+    // Per-session plugin copy
     install_plugin(&state.plugin_path, &dirs.plugin)
         .map_err(|e| AppError::Session(format!("failed to install plugin: {e}")))?;
+
+    // Write initial settings.json so claw discovers the plugin via externalDirectories.
+    // init.sh will merge its own keys (systemPrompt, permissionMode, mcpServers) into this.
+    let initial_settings = serde_json::json!({
+        "plugins": {
+            "externalDirectories": [dirs.plugin.display().to_string()]
+        }
+    });
+    std::fs::write(
+        dirs.config.join("settings.json"),
+        serde_json::to_string_pretty(&initial_settings).unwrap(),
+    ).map_err(|e| AppError::Session(format!("failed to write session settings: {e}")))?;
+
+    // Copy credentials.json from the user's default claw config home so the
+    // per-session CLAW_CONFIG_HOME has working API credentials (OAuth token etc.).
+    let default_claw_home = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".claw"))
+        .ok();
+    if let Some(creds_src) = default_claw_home.map(|h| h.join("credentials.json")) {
+        if creds_src.exists() {
+            if let Err(e) = std::fs::copy(&creds_src, dirs.config.join("credentials.json")) {
+                tracing::warn!(src = %creds_src.display(), error = %e, "could not copy credentials.json into session config");
+            }
+        }
+    }
 
     // Mount OverlayFS
     mount_overlay(&dirs).await?;

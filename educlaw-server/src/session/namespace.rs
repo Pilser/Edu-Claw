@@ -95,12 +95,10 @@ pub async fn spawn_claw_session(params: &SpawnParams) -> Result<u32> {
         claw_args.push("--model".to_string());
         claw_args.push(model.clone());
     }
-    claw_args.push("--add-dir".to_string());
-    claw_args.push(params.dirs.plugin.display().to_string());
     let claw_cmd = claw_args.join(" ");
 
     let mut cmd = Command::new("unshare");
-    cmd.args(["--mount", "--pid", "--fork", "sh", "-c", &claw_cmd]);
+    cmd.args(["--user", "--map-root-user", "--mount", "--pid", "--fork", "sh", "-c", &claw_cmd]);
     cmd.current_dir(&params.dirs.merged);
     cmd.env("CLAW_CONFIG_HOME", &params.dirs.config);
     cmd.env("EDUCLAW_STUDENT_JSON", &params.student_json);
