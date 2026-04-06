@@ -61,6 +61,8 @@ function StudentsTab({ token, role }: { token: string; role: string }) {
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState('')
   const [creating, setCreating] = useState(false)
+  const [editId,   setEditId]   = useState<string | null>(null)
+  const [editForm, setEditForm] = useState({ display_name: '', cohort_id: '', new_password: '' })
 
   async function load() {
     setLoading(true)
@@ -98,7 +100,34 @@ function StudentsTab({ token, role }: { token: string; role: string }) {
     }
   }
 
+  function startEdit(s: AdminStudent) {
+    setEditId(s.id)
+    setEditForm({ display_name: s.display_name, cohort_id: s.cohort_id, new_password: '' })
+    setError('')
+  }
+
+  async function handleSaveEdit(id: string) {
+    try {
+      await api.adminUpdateStudent(token, id, {
+        display_name: editForm.display_name || undefined,
+        cohort_id:    editForm.cohort_id    || undefined,
+        new_password: editForm.new_password || undefined,
+      })
+      setEditId(null)
+      load()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Update failed') }
+  }
+
+  async function handleDelete(id: string, username: string) {
+    if (!confirm(`Delete account "${username}"? This cannot be undone.`)) return
+    try {
+      await api.adminDeleteStudent(token, id)
+      load()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Delete failed') }
+  }
+
   const inputCls = 'px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-slate-800 placeholder-slate-400'
+  const btnSm = 'px-2 py-1 rounded text-xs font-medium transition-colors'
 
   return (
     <div className="space-y-6">
@@ -138,6 +167,8 @@ function StudentsTab({ token, role }: { token: string; role: string }) {
         </form>
       )}
 
+      {error && !creating && <p className="text-red-600 text-sm">⚠ {error}</p>}
+
       {loading ? (
         <p className="text-slate-500 text-sm">Loading…</p>
       ) : (
@@ -145,13 +176,36 @@ function StudentsTab({ token, role }: { token: string; role: string }) {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
               <tr>
-                {['Username', 'Name', 'Role', 'Cohort', 'Last seen', 'Status'].map(h => (
+                {['Username', 'Name', 'Role', 'Cohort', 'Last seen', 'Status', ''].map(h => (
                   <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {students.map(s => (
+              {students.map(s => editId === s.id ? (
+                <tr key={s.id} className="bg-blue-50">
+                  <td className="px-4 py-2 font-mono text-slate-500 text-xs">{s.username}</td>
+                  <td className="px-2 py-2">
+                    <input value={editForm.display_name} onChange={e => setEditForm(f => ({ ...f, display_name: e.target.value }))}
+                      className={`${inputCls} w-32`} placeholder="Display name" />
+                  </td>
+                  <td className="px-2 py-2 text-slate-400 text-xs">{s.role}</td>
+                  <td className="px-2 py-2">
+                    <select value={editForm.cohort_id} onChange={e => setEditForm(f => ({ ...f, cohort_id: e.target.value }))} className={inputCls}>
+                      <option value="">— none —</option>
+                      {cohorts.map(c => <option key={c.id} value={c.id}>{c.title}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-2 py-2" colSpan={2}>
+                    <input value={editForm.new_password} onChange={e => setEditForm(f => ({ ...f, new_password: e.target.value }))}
+                      type="password" className={`${inputCls} w-32`} placeholder="New password (opt)" />
+                  </td>
+                  <td className="px-2 py-2 flex gap-1">
+                    <button onClick={() => handleSaveEdit(s.id)} className={`${btnSm} bg-green-600 text-white hover:bg-green-700`}>Save</button>
+                    <button onClick={() => setEditId(null)} className={`${btnSm} bg-slate-200 text-slate-700 hover:bg-slate-300`}>Cancel</button>
+                  </td>
+                </tr>
+              ) : (
                 <tr key={s.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3 font-mono text-slate-700">{s.username}</td>
                   <td className="px-4 py-3 text-slate-800">{s.display_name}</td>
@@ -167,10 +221,16 @@ function StudentsTab({ token, role }: { token: string; role: string }) {
                       ? <span className="flex items-center gap-1 text-green-600 text-xs"><span className="w-2 h-2 bg-green-500 rounded-full inline-block" />Active</span>
                       : <span className="text-slate-400 text-xs">Offline</span>}
                   </td>
+                  {role === 'admin' && (
+                    <td className="px-4 py-3 flex gap-1">
+                      <button onClick={() => startEdit(s)} className={`${btnSm} bg-slate-100 text-slate-700 hover:bg-slate-200`}>Edit</button>
+                      <button onClick={() => handleDelete(s.id, s.username)} className={`${btnSm} bg-red-50 text-red-600 hover:bg-red-100`}>Del</button>
+                    </td>
+                  )}
                 </tr>
               ))}
               {students.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400 text-sm">No accounts yet — create the first one above.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400 text-sm">No accounts yet — create the first one above.</td></tr>
               )}
             </tbody>
           </table>
@@ -183,24 +243,19 @@ function StudentsTab({ token, role }: { token: string; role: string }) {
 // ── Cohorts tab ──────────────────────────────────────────────────────────────
 
 function CohortsTab({ token }: { token: string }) {
-  const [cohorts,    setCohorts]    = useState<Cohort[]>([])
-  const [subjects,   setSubjects]   = useState<Subject[]>([])
-  const [loading,    setLoading]    = useState(true)
-  const [creating,   setCreating]   = useState(false)
-  const [title,      setTitle]      = useState('')
-  const [subjectIds, setSubjectIds] = useState('')
-  const [error,      setError]      = useState('')
+  const [cohorts,  setCohorts]  = useState<Cohort[]>([])
+  const [loading,  setLoading]  = useState(true)
+  const [creating, setCreating] = useState(false)
+  const [slug,     setSlug]     = useState('')
+  const [title,    setTitle]    = useState('')
+  const [error,    setError]    = useState('')
+  const [editId,   setEditId]   = useState<string | null>(null)
+  const [editForm, setEditForm] = useState({ slug: '', title: '' })
 
   async function load() {
     setLoading(true)
-    try {
-      const [c, s] = await Promise.all([
-        api.adminListCohorts(token),
-        api.adminListSubjects(token),
-      ])
-      setCohorts(c)
-      setSubjects(s)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Failed to load') }
+    try { setCohorts(await api.adminListCohorts(token)) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Failed to load') }
     finally { setLoading(false) }
   }
 
@@ -208,34 +263,37 @@ function CohortsTab({ token }: { token: string }) {
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault()
-    const ids = subjectIds.split(',').map(s => s.trim()).filter(Boolean)
     try {
-      await api.adminCreateCohort(token, title.trim(), ids)
-      setTitle('')
-      setSubjectIds('')
-      setCreating(false)
-      load()
+      await api.adminCreateCohort(token, slug.trim(), title.trim())
+      setSlug(''); setTitle(''); setCreating(false); load()
     } catch (e) { setError(e instanceof Error ? e.message : 'Create failed') }
   }
 
+  function startEdit(c: Cohort) {
+    setEditId(c.id); setEditForm({ slug: c.id, title: c.title }); setError('')
+  }
+
+  async function handleSaveEdit(oldId: string) {
+    try {
+      await api.adminUpdateCohort(token, oldId, editForm.slug !== oldId ? editForm.slug : undefined, editForm.title)
+      setEditId(null); load()
+    } catch (e) { setError(e instanceof Error ? e.message : 'Update failed') }
+  }
+
+  async function handleDelete(id: string, t: string) {
+    if (!confirm(`Delete cohort "${t}" and ALL its subjects + their files? This cannot be undone.`)) return
+    try { await api.adminDeleteCohort(token, id); load() }
+    catch (e) { setError(e instanceof Error ? e.message : 'Delete failed') }
+  }
+
   const inputCls = 'px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-slate-800 placeholder-slate-400'
-
-  function subjectLabel(id: string) {
-    return subjects.find(s => s.id === id)?.title ?? id
-  }
-
-  function parsedSubjectIds(raw: string): string[] {
-    try { return JSON.parse(raw) } catch { return [] }
-  }
+  const btnSm = 'px-2 py-1 rounded text-xs font-medium transition-colors'
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-slate-700">Cohorts</h2>
-        <button
-          onClick={() => setCreating(c => !c)}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
-        >
+        <button onClick={() => setCreating(c => !c)} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
           {creating ? 'Cancel' : '+ New cohort'}
         </button>
       </div>
@@ -244,47 +302,55 @@ function CohortsTab({ token }: { token: string }) {
         <form onSubmit={handleCreate} className="bg-white rounded-xl border border-slate-200 p-5 space-y-3 max-w-md">
           <div className="font-medium text-sm text-slate-700">Create cohort</div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Title</label>
-            <input value={title} onChange={e => setTitle(e.target.value)} required placeholder="e.g. Class 2025" className={`${inputCls} w-full`} />
+            <label className="block text-xs text-slate-500 mb-1">Slug (ID — e.g. year-5a, primary-2b)</label>
+            <input value={slug} onChange={e => setSlug(e.target.value)} required placeholder="e.g. year-5a" pattern="[a-zA-Z0-9_-]+" title="Alphanumeric, dash, underscore only" className={`${inputCls} w-full font-mono`} />
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Subject IDs (comma-separated, optional)</label>
-            <input value={subjectIds} onChange={e => setSubjectIds(e.target.value)} placeholder="e.g. math, science" className={`${inputCls} w-full`} />
+            <label className="block text-xs text-slate-500 mb-1">Title</label>
+            <input value={title} onChange={e => setTitle(e.target.value)} required placeholder="e.g. Year 5A — 2025" className={`${inputCls} w-full`} />
           </div>
           {error && <p className="text-red-600 text-sm">⚠ {error}</p>}
           <button type="submit" className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white text-sm font-medium rounded-lg">Create</button>
         </form>
       )}
 
-      {loading ? (
-        <p className="text-slate-500 text-sm">Loading…</p>
-      ) : (
+      {error && !creating && <p className="text-red-600 text-sm">⚠ {error}</p>}
+
+      {loading ? <p className="text-slate-500 text-sm">Loading…</p> : (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
-              <tr>
-                {['ID', 'Title', 'Subjects', 'Created'].map(h => (
-                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                ))}
-              </tr>
+              <tr>{['Slug (ID)', 'Title', 'Created', ''].map(h => <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>)}</tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {cohorts.map(c => (
+              {cohorts.map(c => editId === c.id ? (
+                <tr key={c.id} className="bg-blue-50">
+                  <td className="px-2 py-2">
+                    <input value={editForm.slug} onChange={e => setEditForm(f => ({ ...f, slug: e.target.value }))}
+                      pattern="[a-zA-Z0-9_-]+" className={`${inputCls} w-36 font-mono`} />
+                  </td>
+                  <td className="px-2 py-2">
+                    <input value={editForm.title} onChange={e => setEditForm(f => ({ ...f, title: e.target.value }))}
+                      className={`${inputCls} w-48`} />
+                  </td>
+                  <td className="px-4 py-2 text-slate-400 text-xs">{new Date(c.created_at).toLocaleDateString()}</td>
+                  <td className="px-2 py-2 flex gap-1">
+                    <button onClick={() => handleSaveEdit(c.id)} className={`${btnSm} bg-green-600 text-white hover:bg-green-700`}>Save</button>
+                    <button onClick={() => setEditId(null)} className={`${btnSm} bg-slate-200 text-slate-700 hover:bg-slate-300`}>Cancel</button>
+                  </td>
+                </tr>
+              ) : (
                 <tr key={c.id} className="hover:bg-slate-50">
                   <td className="px-4 py-3 font-mono text-xs text-slate-600">{c.id}</td>
                   <td className="px-4 py-3 text-slate-800">{c.title}</td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">
-                    {parsedSubjectIds(c.subject_ids).map(id => (
-                      <span key={id} className="inline-block bg-blue-50 text-blue-700 rounded px-1.5 py-0.5 mr-1 mb-1">{subjectLabel(id)}</span>
-                    ))}
-                    {parsedSubjectIds(c.subject_ids).length === 0 && '—'}
-                  </td>
                   <td className="px-4 py-3 text-slate-400 text-xs">{new Date(c.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 flex gap-1">
+                    <button onClick={() => startEdit(c)} className={`${btnSm} bg-slate-100 text-slate-700 hover:bg-slate-200`}>Edit</button>
+                    <button onClick={() => handleDelete(c.id, c.title)} className={`${btnSm} bg-red-50 text-red-600 hover:bg-red-100`}>Del</button>
+                  </td>
                 </tr>
               ))}
-              {cohorts.length === 0 && (
-                <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400 text-sm">No cohorts yet.</td></tr>
-              )}
+              {cohorts.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400 text-sm">No cohorts yet.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -296,15 +362,27 @@ function CohortsTab({ token }: { token: string }) {
 // ── Subjects tab ──────────────────────────────────────────────────────────────
 
 function SubjectsTab({ token }: { token: string }) {
-  const [subjects, setSubjects] = useState<Subject[]>([])
-  const [loading,  setLoading]  = useState(true)
-  const [creating, setCreating] = useState(false)
-  const [title,    setTitle]    = useState('')
-  const [error,    setError]    = useState('')
+  const [subjects,     setSubjects]     = useState<Subject[]>([])
+  const [cohorts,      setCohorts]      = useState<Cohort[]>([])
+  const [loading,      setLoading]      = useState(true)
+  const [creating,     setCreating]     = useState(false)
+  const [cohortId,     setCohortId]     = useState('')
+  const [filterCohort, setFilterCohort] = useState('')
+  const [slug,         setSlug]         = useState('')
+  const [title,        setTitle]        = useState('')
+  const [error,        setError]        = useState('')
+  const [editId,       setEditId]       = useState<string | null>(null)
+  const [editForm,     setEditForm]     = useState({ slug: '', title: '' })
 
-  async function load() {
+  async function load(forCohort?: string) {
     setLoading(true)
-    try { setSubjects(await api.adminListSubjects(token)) }
+    try {
+      const [s, c] = await Promise.all([
+        api.adminListSubjects(token, forCohort || undefined),
+        api.adminListCohorts(token),
+      ])
+      setSubjects(s); setCohorts(c)
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'Failed to load') }
     finally { setLoading(false) }
   }
@@ -314,30 +392,63 @@ function SubjectsTab({ token }: { token: string }) {
   async function handleCreate(e: FormEvent) {
     e.preventDefault()
     try {
-      await api.adminCreateSubject(token, title.trim())
-      setTitle('')
-      setCreating(false)
-      load()
+      await api.adminCreateSubject(token, cohortId, slug.trim(), title.trim())
+      setCohortId(''); setSlug(''); setTitle(''); setCreating(false)
+      load(filterCohort || undefined)
     } catch (e) { setError(e instanceof Error ? e.message : 'Create failed') }
   }
 
+  function startEdit(s: Subject) {
+    setEditId(s.id); setEditForm({ slug: s.slug, title: s.title }); setError('')
+  }
+
+  async function handleSaveEdit(subj: Subject) {
+    try {
+      await api.adminUpdateSubject(token, subj.id, editForm.slug !== subj.slug ? editForm.slug : undefined, editForm.title)
+      setEditId(null); load(filterCohort || undefined)
+    } catch (e) { setError(e instanceof Error ? e.message : 'Update failed') }
+  }
+
+  async function handleDelete(s: Subject) {
+    if (!confirm(`Delete subject "${s.title}" and all its files? This cannot be undone.`)) return
+    try { await api.adminDeleteSubject(token, s.id); load(filterCohort || undefined) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Delete failed') }
+  }
+
+  function cohortTitle(id: string) { return cohorts.find(c => c.id === id)?.title ?? id }
+
   const inputCls = 'px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm text-slate-800 placeholder-slate-400'
+  const btnSm = 'px-2 py-1 rounded text-xs font-medium transition-colors'
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <h2 className="text-lg font-semibold text-slate-700">Subjects</h2>
-        <button
-          onClick={() => setCreating(c => !c)}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          {creating ? 'Cancel' : '+ New subject'}
-        </button>
+        <div className="flex items-center gap-2">
+          <select value={filterCohort} onChange={e => { setFilterCohort(e.target.value); load(e.target.value || undefined) }} className={inputCls}>
+            <option value="">All cohorts</option>
+            {cohorts.map(c => <option key={c.id} value={c.id}>{c.title}</option>)}
+          </select>
+          <button onClick={() => setCreating(c => !c)} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
+            {creating ? 'Cancel' : '+ New subject'}
+          </button>
+        </div>
       </div>
 
       {creating && (
         <form onSubmit={handleCreate} className="bg-white rounded-xl border border-slate-200 p-5 space-y-3 max-w-md">
           <div className="font-medium text-sm text-slate-700">Create subject</div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Cohort</label>
+            <select value={cohortId} onChange={e => setCohortId(e.target.value)} required className={`${inputCls} w-full`}>
+              <option value="">— Select cohort —</option>
+              {cohorts.map(c => <option key={c.id} value={c.id}>{c.title}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Slug <span className="text-slate-400">(alphanumeric/dash, e.g. mathematics)</span></label>
+            <input value={slug} onChange={e => setSlug(e.target.value)} required placeholder="e.g. mathematics" className={`${inputCls} w-full`} />
+          </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Title</label>
             <input value={title} onChange={e => setTitle(e.target.value)} required placeholder="e.g. Introduction to Mathematics" className={`${inputCls} w-full`} />
@@ -347,28 +458,46 @@ function SubjectsTab({ token }: { token: string }) {
         </form>
       )}
 
-      {loading ? (
-        <p className="text-slate-500 text-sm">Loading…</p>
-      ) : (
+      {error && !creating && <p className="text-red-600 text-sm">⚠ {error}</p>}
+
+      {loading ? <p className="text-slate-500 text-sm">Loading…</p> : (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
-              <tr>
-                {['ID', 'Title', 'Created'].map(h => (
-                  <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                ))}
-              </tr>
+              <tr>{['Cohort', 'Slug', 'Title', 'Created', ''].map(h => <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>)}</tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {subjects.map(s => (
+              {subjects.map(s => editId === s.id ? (
+                <tr key={s.id} className="bg-blue-50">
+                  <td className="px-4 py-3 text-slate-500 text-xs">{cohortTitle(s.cohort_id)}</td>
+                  <td className="px-2 py-2">
+                    <input value={editForm.slug} onChange={e => setEditForm(f => ({ ...f, slug: e.target.value }))}
+                      pattern="[a-zA-Z0-9_-]+" className={`${inputCls} w-32 font-mono`} />
+                  </td>
+                  <td className="px-2 py-2">
+                    <input value={editForm.title} onChange={e => setEditForm(f => ({ ...f, title: e.target.value }))}
+                      className={`${inputCls} w-48`} />
+                  </td>
+                  <td className="px-4 py-2 text-slate-400 text-xs">{new Date(s.created_at).toLocaleDateString()}</td>
+                  <td className="px-2 py-2 flex gap-1">
+                    <button onClick={() => handleSaveEdit(s)} className={`${btnSm} bg-green-600 text-white hover:bg-green-700`}>Save</button>
+                    <button onClick={() => setEditId(null)} className={`${btnSm} bg-slate-200 text-slate-700 hover:bg-slate-300`}>Cancel</button>
+                  </td>
+                </tr>
+              ) : (
                 <tr key={s.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-3 font-mono text-xs text-slate-600">{s.id}</td>
+                  <td className="px-4 py-3 text-slate-500 text-xs">{cohortTitle(s.cohort_id)}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-600">{s.slug}</td>
                   <td className="px-4 py-3 text-slate-800">{s.title}</td>
                   <td className="px-4 py-3 text-slate-400 text-xs">{new Date(s.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 flex gap-1">
+                    <button onClick={() => startEdit(s)} className={`${btnSm} bg-slate-100 text-slate-700 hover:bg-slate-200`}>Edit</button>
+                    <button onClick={() => handleDelete(s)} className={`${btnSm} bg-red-50 text-red-600 hover:bg-red-100`}>Del</button>
+                  </td>
                 </tr>
               ))}
               {subjects.length === 0 && (
-                <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400 text-sm">No subjects yet.</td></tr>
+                <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400 text-sm">No subjects yet.</td></tr>
               )}
             </tbody>
           </table>
@@ -378,7 +507,7 @@ function SubjectsTab({ token }: { token: string }) {
       <div className="bg-slate-100 rounded-xl p-4 text-xs text-slate-600 max-w-md">
         <p className="font-medium mb-1">After creating a subject:</p>
         <p>Copy course materials (.md files + image folders) into:</p>
-        <code className="block mt-1 bg-white rounded px-2 py-1 font-mono">/srv/educlaw/data/subjects/&lt;subject_id&gt;/</code>
+        <code className="block mt-1 bg-white rounded px-2 py-1 font-mono">/srv/educlaw/data/subjects/&lt;cohort_id&gt;/&lt;slug&gt;/</code>
       </div>
     </div>
   )

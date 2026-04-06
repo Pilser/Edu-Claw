@@ -209,7 +209,7 @@ async fn list_subject_files(
 
     let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
         .unwrap_or_else(|_| "/data/subjects".to_string());
-    let base = PathBuf::from(&subjects_root).join(&subject_id);
+    let base = PathBuf::from(&subjects_root).join(&claims.cohort_id).join(&subject_id);
 
     if !base.exists() {
         return Err(AppError::NotFound(format!("subject {subject_id} not found")));
@@ -231,7 +231,7 @@ async fn read_subject_file(
 
     let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
         .unwrap_or_else(|_| "/data/subjects".to_string());
-    let base = PathBuf::from(&subjects_root).join(&subject_id);
+    let base = PathBuf::from(&subjects_root).join(&claims.cohort_id).join(&subject_id);
     let path = safe_join(&base, &rel_path)?;
 
     file_response(&path)

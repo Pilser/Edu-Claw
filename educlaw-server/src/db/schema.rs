@@ -9,22 +9,35 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
     // ── cohorts ───────────────────────────────────────────────────────────────
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS cohorts (
-            id          TEXT PRIMARY KEY,
-            title       TEXT NOT NULL,
-            subject_ids TEXT NOT NULL DEFAULT '[]',
-            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            id         TEXT PRIMARY KEY,
+            title      TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )",
     )
     .execute(pool)
     .await?;
 
     // ── subjects ──────────────────────────────────────────────────────────────
+    // Scoped per cohort: (cohort_id, slug) is the natural unique key.
+    // Disk layout: {EDUCLAW_SUBJECTS_ROOT}/{cohort_id}/{slug}/
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS subjects (
             id         TEXT PRIMARY KEY,
+            cohort_id  TEXT NOT NULL,
+            slug       TEXT NOT NULL,
             title      TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_cohort_slug ON subjects(cohort_id, slug)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_subjects_cohort ON subjects(cohort_id)",
     )
     .execute(pool)
     .await?;

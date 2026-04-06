@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::sessions::{self as db_sess, Session};
-use crate::db::{cohorts, students};
+use crate::db::{students, subjects};
 use crate::auth::bearer_token;
 use crate::error::{AppError, Result};
 use crate::session::{
@@ -77,14 +77,15 @@ async fn create_session(
     // Mount OverlayFS
     mount_overlay(&dirs).await?;
 
-    // Resolve cohort → subject_ids for JWT
+    // Resolve subject slugs for this cohort
     let subject_ids: Vec<String> = if student.cohort_id.is_empty() {
         vec![]
     } else {
-        match cohorts::get_cohort(&state.pool, &student.cohort_id).await? {
-            Some(c) => serde_json::from_str(&c.subject_ids).unwrap_or_default(),
-            None => vec![],
-        }
+        subjects::list_subjects(&state.pool, &student.cohort_id)
+            .await?
+            .into_iter()
+            .map(|s| s.slug)
+            .collect()
     };
 
     // Build the student JSON blob injected into the session environment.

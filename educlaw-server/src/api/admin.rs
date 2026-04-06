@@ -15,10 +15,9 @@
 // Cohorts
 //   GET    /admin/cohorts               — list all cohorts
 //   POST   /admin/cohorts               — create a cohort
-//   PUT    /admin/cohorts/:id/subjects  — set subject_ids JSON for a cohort
 // Subjects
-//   GET    /admin/subjects              — list all subjects
-//   POST   /admin/subjects              — create a subject (creates dir on disk)
+//   GET    /admin/subjects?cohort_id=   — list subjects (filter by cohort)
+//   POST   /admin/subjects              — create a subject (cohort_id + slug required)
 // Assignments
 //   GET    /admin/assignments?subject_id=  — list assignments (all, or filter by subject)
 //   POST   /admin/assignments              — create an assignment
@@ -48,15 +47,16 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         // Students
         .route("/admin/students",          get(list_students).post(create_student))
-        .route("/admin/students/{id}",     put(update_student))
+        .route("/admin/students/{id}",     put(update_student).delete(delete_student))
         // Sessions
         .route("/admin/sessions",          get(list_sessions))
         .route("/admin/sessions/{id}",     delete(terminate_session))
         // Cohorts
         .route("/admin/cohorts",           get(list_cohorts).post(create_cohort))
-        .route("/admin/cohorts/{id}/subjects", put(set_cohort_subjects))
+        .route("/admin/cohorts/{id}",      put(update_cohort).delete(delete_cohort))
         // Subjects
         .route("/admin/subjects",          get(list_subjects_handler).post(create_subject))
+        .route("/admin/subjects/{id}",     put(update_subject_handler).delete(delete_subject_handler))
         // Assignments
         .route("/admin/assignments",       get(list_assignments).post(create_assignment))
 }
@@ -205,6 +205,22 @@ async fn update_student(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── DELETE /admin/students/:id ────────────────────────────────────────────
+
+async fn delete_student(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    require_admin(&state, &headers)?;
+    students::get_student(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("student {id}")))?;
+    students::delete_student(&state.pool, &id).await?;
+    tracing::info!(student_id = %id, "admin: student deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── GET /admin/sessions ───────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -290,9 +306,10 @@ async fn list_cohorts(
 
 #[derive(Deserialize)]
 struct CreateCohortBody {
+    /// Human-readable slug used as the cohort ID, e.g. "primary-2b", "year-5a".
+    /// Alphanumeric, dashes, underscores only.
+    slug: String,
     title: String,
-    /// JSON array of subject UUIDs, e.g. ["id1","id2"].  Defaults to empty.
-    subject_ids: Option<Vec<String>>,
 }
 
 async fn create_cohort(
@@ -302,13 +319,17 @@ async fn create_cohort(
 ) -> Result<impl IntoResponse> {
     require_admin(&state, &headers)?;
 
-    let subject_ids_json = serde_json::to_string(&body.subject_ids.unwrap_or_default())
-        .map_err(|e| AppError::Internal(e.into()))?;
+    if body.slug.is_empty()
+        || !body.slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "cohort slug must be non-empty alphanumeric/dash/underscore".into(),
+        ));
+    }
 
     let cohort = db_cohorts::Cohort {
-        id: Uuid::new_v4().to_string(),
+        id: body.slug.clone(),
         title: body.title,
-        subject_ids: subject_ids_json,
         created_at: String::new(),
     };
     db_cohorts::insert_cohort(&state.pool, &cohort).await?;
@@ -317,18 +338,20 @@ async fn create_cohort(
     Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": cohort.id }))))
 }
 
-// ── PUT /admin/cohorts/:id/subjects ──────────────────────────────────────
+// ── PUT /admin/cohorts/:id ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct SetCohortSubjectsBody {
-    subject_ids: Vec<String>,
+struct UpdateCohortBody {
+    /// New slug (becomes the new PK / directory name). Optional — omit to keep current.
+    new_slug: Option<String>,
+    title: String,
 }
 
-async fn set_cohort_subjects(
+async fn update_cohort(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
-    Json(body): Json<SetCohortSubjectsBody>,
+    Json(body): Json<UpdateCohortBody>,
 ) -> Result<impl IntoResponse> {
     require_admin(&state, &headers)?;
 
@@ -336,22 +359,78 @@ async fn set_cohort_subjects(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("cohort {id}")))?;
 
-    let json = serde_json::to_string(&body.subject_ids)
-        .map_err(|e| AppError::Internal(e.into()))?;
-    db_cohorts::update_cohort_subjects(&state.pool, &id, &json).await?;
+    let new_slug = body.new_slug.as_deref().unwrap_or(&id);
 
-    tracing::info!(cohort_id = %id, "admin: cohort subjects updated");
+    if new_slug.is_empty()
+        || !new_slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest("slug must be alphanumeric/dash/underscore".into()));
+    }
+
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
+
+    // Rename directory on disk if slug changed.
+    if new_slug != id {
+        let old_dir = Path::new(&subjects_root).join(&id);
+        let new_dir = Path::new(&subjects_root).join(new_slug);
+        if old_dir.exists() {
+            tokio::fs::rename(&old_dir, &new_dir)
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("rename cohort dir: {e}")))?;
+        }
+        db_cohorts::rename_cohort(&state.pool, &id, new_slug, &body.title).await?;
+    } else {
+        db_cohorts::update_cohort_title(&state.pool, &id, &body.title).await?;
+    }
+
+    tracing::info!(old_id = %id, new_id = %new_slug, "admin: cohort updated");
+    Ok(Json(serde_json::json!({ "id": new_slug })))
+}
+
+// ── DELETE /admin/cohorts/:id ─────────────────────────────────────────────
+
+async fn delete_cohort(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    require_admin(&state, &headers)?;
+
+    db_cohorts::get_cohort(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("cohort {id}")))?;
+
+    // Delete cohort dir from disk (best-effort — don't fail if missing).
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
+    let cohort_dir = Path::new(&subjects_root).join(&id);
+    if cohort_dir.exists() {
+        tokio::fs::remove_dir_all(&cohort_dir)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("remove cohort dir: {e}")))?;
+    }
+
+    db_cohorts::delete_cohort(&state.pool, &id).await?;
+    tracing::info!(cohort_id = %id, "admin: cohort deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── GET /admin/subjects ───────────────────────────────────────────────────
+// ── GET /admin/subjects?cohort_id= ───────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ListSubjectsQuery {
+    cohort_id: Option<String>,
+}
 
 async fn list_subjects_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<ListSubjectsQuery>,
 ) -> Result<impl IntoResponse> {
     require_staff(&state, &headers)?;
-    let rows = db_subjects::list_subjects(&state.pool).await?;
+    let cohort_id = q.cohort_id.as_deref().unwrap_or("");
+    let rows = db_subjects::list_subjects(&state.pool, cohort_id).await?;
     Ok(Json(rows))
 }
 
@@ -359,6 +438,8 @@ async fn list_subjects_handler(
 
 #[derive(Deserialize)]
 struct CreateSubjectBody {
+    cohort_id: String,
+    slug: String,
     title: String,
 }
 
@@ -369,29 +450,141 @@ async fn create_subject(
 ) -> Result<impl IntoResponse> {
     require_admin(&state, &headers)?;
 
+    // Validate slug: alphanumeric, dash, underscore only.
+    if body.slug.is_empty()
+        || !body.slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "slug must be non-empty alphanumeric/dash/underscore".into(),
+        ));
+    }
+
     let subject = db_subjects::Subject {
         id: Uuid::new_v4().to_string(),
+        cohort_id: body.cohort_id.clone(),
+        slug: body.slug.clone(),
         title: body.title,
         created_at: String::new(),
     };
     db_subjects::insert_subject(&state.pool, &subject).await?;
 
-    // Create the subject directory on disk.
+    // Create the subject directory on disk: {subjects_root}/{cohort_id}/{slug}/
     let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
         .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
-    let subject_dir = Path::new(&subjects_root).join(&subject.id);
+    let subject_dir = Path::new(&subjects_root)
+        .join(&subject.cohort_id)
+        .join(&subject.slug);
     tokio::fs::create_dir_all(&subject_dir)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("create subject dir: {e}")))?;
 
     // Write a minimal subject.json metadata file.
-    let meta = serde_json::json!({ "id": subject.id, "title": subject.title });
+    let meta = serde_json::json!({
+        "id": subject.id,
+        "cohort_id": subject.cohort_id,
+        "slug": subject.slug,
+        "title": subject.title,
+    });
     tokio::fs::write(subject_dir.join("subject.json"), meta.to_string())
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("write subject.json: {e}")))?;
 
-    tracing::info!(subject_id = %subject.id, title = %subject.title, "admin: subject created");
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": subject.id }))))
+    tracing::info!(
+        subject_id = %subject.id,
+        cohort_id = %subject.cohort_id,
+        slug = %subject.slug,
+        title = %subject.title,
+        "admin: subject created"
+    );
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "id": subject.id, "slug": subject.slug }))))
+}
+
+// ── PUT /admin/subjects/:id ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct UpdateSubjectBody {
+    /// New slug. Optional — omit to keep current slug.
+    new_slug: Option<String>,
+    title: String,
+}
+
+async fn update_subject_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateSubjectBody>,
+) -> Result<impl IntoResponse> {
+    require_admin(&state, &headers)?;
+
+    let subject = db_subjects::get_subject(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("subject {id}")))?;
+
+    let new_slug = body.new_slug.as_deref().unwrap_or(&subject.slug);
+
+    if new_slug.is_empty()
+        || !new_slug.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest("slug must be alphanumeric/dash/underscore".into()));
+    }
+
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
+
+    // Rename disk directory if slug changed.
+    if new_slug != subject.slug {
+        let old_dir = Path::new(&subjects_root).join(&subject.cohort_id).join(&subject.slug);
+        let new_dir = Path::new(&subjects_root).join(&subject.cohort_id).join(new_slug);
+        if old_dir.exists() {
+            tokio::fs::rename(&old_dir, &new_dir)
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("rename subject dir: {e}")))?;
+        }
+    }
+
+    // Update subject.json in the (possibly new) directory.
+    let subject_dir = Path::new(&subjects_root).join(&subject.cohort_id).join(new_slug);
+    if subject_dir.exists() {
+        let meta = serde_json::json!({
+            "id": id,
+            "cohort_id": subject.cohort_id,
+            "slug": new_slug,
+            "title": body.title,
+        });
+        let _ = tokio::fs::write(subject_dir.join("subject.json"), meta.to_string()).await;
+    }
+
+    db_subjects::update_subject(&state.pool, &id, new_slug, &body.title).await?;
+
+    tracing::info!(subject_id = %id, new_slug = %new_slug, "admin: subject updated");
+    Ok(Json(serde_json::json!({ "id": id, "slug": new_slug })))
+}
+
+// ── DELETE /admin/subjects/:id ────────────────────────────────────────────
+
+async fn delete_subject_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    require_admin(&state, &headers)?;
+
+    let subject = db_subjects::get_subject(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("subject {id}")))?;
+
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
+    let subject_dir = Path::new(&subjects_root).join(&subject.cohort_id).join(&subject.slug);
+    if subject_dir.exists() {
+        tokio::fs::remove_dir_all(&subject_dir)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("remove subject dir: {e}")))?;
+    }
+
+    db_subjects::delete_subject(&state.pool, &id).await?;
+    tracing::info!(subject_id = %id, "admin: subject deleted");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── GET /admin/assignments?subject_id= ───────────────────────────────────

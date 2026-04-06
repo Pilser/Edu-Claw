@@ -93,6 +93,13 @@ export const api = {
     }).then(json)
   },
 
+  async adminDeleteStudent(token: string, id: string): Promise<void> {
+    await fetch(`${BASE}/admin/students/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  },
+
   // ── Admin — Sessions ─────────────────────────────────────────────────────
 
   async adminListSessions(token: string): Promise<AdminSession[]> {
@@ -116,36 +123,61 @@ export const api = {
     }).then(json)
   },
 
-  async adminCreateCohort(token: string, title: string, subjectIds: string[]): Promise<{ id: string }> {
+  async adminCreateCohort(token: string, slug: string, title: string): Promise<{ id: string }> {
     return fetch(`${BASE}/admin/cohorts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ title, subject_ids: subjectIds }),
+      body: JSON.stringify({ slug, title }),
     }).then(json)
   },
 
-  async adminSetCohortSubjects(token: string, cohortId: string, subjectIds: string[]): Promise<void> {
-    await fetch(`${BASE}/admin/cohorts/${cohortId}/subjects`, {
+  async adminUpdateCohort(token: string, id: string, newSlug: string | undefined, title: string): Promise<{ id: string }> {
+    return fetch(`${BASE}/admin/cohorts/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ subject_ids: subjectIds }),
+      body: JSON.stringify({ new_slug: newSlug !== id ? newSlug : undefined, title }),
+    }).then(json)
+  },
+
+  async adminDeleteCohort(token: string, id: string): Promise<void> {
+    await fetch(`${BASE}/admin/cohorts/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
     })
   },
 
   // ── Admin — Subjects ─────────────────────────────────────────────────────
 
-  async adminListSubjects(token: string): Promise<Subject[]> {
-    return fetch(`${BASE}/admin/subjects`, {
+  async adminListSubjects(token: string, cohortId?: string): Promise<Subject[]> {
+    const url = cohortId
+      ? `${BASE}/admin/subjects?cohort_id=${encodeURIComponent(cohortId)}`
+      : `${BASE}/admin/subjects`
+    return fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
     }).then(json)
   },
 
-  async adminCreateSubject(token: string, title: string): Promise<{ id: string }> {
+  async adminCreateSubject(token: string, cohortId: string, slug: string, title: string): Promise<{ id: string; slug: string }> {
     return fetch(`${BASE}/admin/subjects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ cohort_id: cohortId, slug, title }),
     }).then(json)
+  },
+
+  async adminUpdateSubject(token: string, id: string, newSlug: string | undefined, title: string): Promise<{ id: string; slug: string }> {
+    return fetch(`${BASE}/admin/subjects/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ new_slug: newSlug, title }),
+    }).then(json)
+  },
+
+  async adminDeleteSubject(token: string, id: string): Promise<void> {
+    await fetch(`${BASE}/admin/subjects/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
   },
 
   // ── Admin — Assignments ──────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 // eval_engine/mod.rs — MCP tool definitions and call_tool dispatch.
 //
-// Assignment specs: {subjects_root}/{subject_id}/assignments/{assignment_id}/spec.json
+// Assignment specs: {subjects_root}/{cohort_id}/{subject_id}/assignments/{assignment_id}/spec.json
 // Student progress: {students_root}/{student_id}/upper/.educlaw_evals/{assignment_id}/
 //
 // Security contract: expected answers and rubric keywords are loaded here but
@@ -158,7 +158,10 @@ fn handle_list_assignments(
     let subject_id = validate_slug(&str_arg("subject_id")?, "subject_id")?;
     let s = require_student(student)?;
     s.assert_subject_access(&subject_id)?;
-    let dir = PathBuf::from(subjects_root).join(&subject_id).join("assignments");
+    let dir = PathBuf::from(subjects_root)
+        .join(&s.cohort_id)
+        .join(&subject_id)
+        .join("assignments");
 
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| McpError::invalid_params(format!("cannot list assignments: {e}"), None))?;
@@ -170,7 +173,7 @@ fn handle_list_assignments(
             let id = e.file_name().to_string_lossy().to_string();
             // Validate slug before loading to prevent path traversal
             validate_slug(&id, "assignment_id").ok()?;
-            let spec = load_spec(subjects_root, &subject_id, &id).ok()?;
+            let spec = load_spec(subjects_root, &s.cohort_id, &subject_id, &id).ok()?;
             let max: u32 = spec.questions.iter().map(|q| q.points).sum();
             Some(json!({
                 "assignment_id": spec.assignment_id,
@@ -201,7 +204,7 @@ fn handle_get_assignment(
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
     s.assert_subject_access(&subject_id)?;
-    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &s.cohort_id, &subject_id, &assignment_id)?;
 
     // Strip expected answers and rubric before returning
     let questions: Vec<Value> = spec
@@ -241,7 +244,7 @@ fn handle_check_answer(
     let s = require_student(student)?;
     s.assert_subject_access(&subject_id)?;
 
-    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &s.cohort_id, &subject_id, &assignment_id)?;
     let q = spec
         .questions
         .iter()
@@ -276,7 +279,7 @@ pub async fn check_answer_async(
     let s = require_student(student)?;
     s.assert_subject_access(&subject_id)?;
 
-    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &s.cohort_id, &subject_id, &assignment_id)?;
     let q = spec
         .questions
         .iter()
@@ -315,7 +318,7 @@ fn handle_record_answer(
         ));
     }
 
-    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &s.cohort_id, &subject_id, &assignment_id)?;
     let q = spec
         .questions
         .iter()
@@ -350,7 +353,7 @@ fn handle_get_progress(
     let assignment_id = validate_slug(&str_arg("assignment_id")?, "assignment_id")?;
     let s = require_student(student)?;
     s.assert_subject_access(&subject_id)?
-;    let spec      = load_spec(subjects_root, &subject_id, &assignment_id)?;;
+;    let spec      = load_spec(subjects_root, &s.cohort_id, &subject_id, &assignment_id)?;;
     let af        = load_answers(students_root, &s.student_id, &assignment_id);
     let submitted = submitted_path(students_root, &s.student_id, &assignment_id).exists();
 
@@ -402,7 +405,7 @@ fn handle_submit(
         return Err(McpError::invalid_params("assignment already submitted", None));
     }
 
-    let spec = load_spec(subjects_root, &subject_id, &assignment_id)?;
+    let spec = load_spec(subjects_root, &s.cohort_id, &subject_id, &assignment_id)?;
     let af   = load_answers(students_root, &s.student_id, &assignment_id);
 
     let mut total = 0u32;

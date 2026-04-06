@@ -73,6 +73,14 @@ pub async fn update_student(
     Ok(())
 }
 
+pub async fn delete_student(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM students WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_uid_slot(
     pool: &SqlitePool,
     id: &str,

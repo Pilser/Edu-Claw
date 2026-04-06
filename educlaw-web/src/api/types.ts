@@ -74,12 +74,13 @@ export interface ChatMessage {
 export interface Cohort {
   id: string
   title: string
-  subject_ids: string  // JSON array from server
   created_at: string
 }
 
 export interface Subject {
   id: string
+  cohort_id: string
+  slug: string
   title: string
   created_at: string
 }

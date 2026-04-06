@@ -7,7 +7,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::po
 use serde::Deserialize;
 
 use crate::auth;
-use crate::db::{cohorts, students};
+use crate::db::{students, subjects};
 use crate::error::{AppError, Result};
 
 use super::AppState;
@@ -43,14 +43,15 @@ async fn student_login(
         return Err(AppError::Unauthorized);
     }
 
-    // Resolve cohort → subject_ids so they go into the JWT.
+    // Resolve subject slugs for this cohort so they go into the JWT.
     let subject_ids: Vec<String> = if student.cohort_id.is_empty() {
         vec![]
     } else {
-        match cohorts::get_cohort(&state.pool, &student.cohort_id).await? {
-            Some(c) => serde_json::from_str(&c.subject_ids).unwrap_or_default(),
-            None => vec![],
-        }
+        subjects::list_subjects(&state.pool, &student.cohort_id)
+            .await?
+            .into_iter()
+            .map(|s| s.slug)
+            .collect()
     };
 
     let token = state.auth.sign_student_token(
