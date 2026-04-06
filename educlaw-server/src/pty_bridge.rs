@@ -410,11 +410,8 @@ pub async fn run_pty_session(
                             });
                         }
                     }
-                } else {
-                    last_input_at.store(now_secs(), Ordering::Relaxed);
-                    let mut w = master_writer.lock().await;
-                    let _ = w.write_all(text.as_bytes());
                 }
+                // Unknown JSON frames (e.g. {"type":"ping"}) are intentionally dropped.
             }
             Ok(Message::Binary(bytes)) => {
                 last_input_at.store(now_secs(), Ordering::Relaxed);
