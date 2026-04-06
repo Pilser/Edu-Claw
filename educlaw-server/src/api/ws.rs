@@ -76,8 +76,9 @@ async fn session_ws(
             ("EDUCLAW_WORKSPACE".to_string(), dirs.merged.display().to_string()),
         ];
 
-        // portable_pty::CommandBuilder spawns with an empty environment.
-        // Forward the essential vars the child process needs.
+        // Forward essential env vars to claw's process.
+        // tokio::process::Command inherits the parent's env unless env_clear() is called;
+        // we call env_clear() in run_pty_session so we must forward everything needed.
         for key in &[
             "HOME", "USER", "PATH", "TERM",
             "XAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",

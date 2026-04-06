@@ -1,21 +1,24 @@
 // educlaw-server/src/pty_bridge.rs
 //
-// PTY-over-WebSocket bridge.
+// Pipe-based bridge between claw (stdin/stdout) and the WebSocket client.
 //
-// When a WebSocket client connects to /sessions/:id/ws:
-//   1. We open a PTY pair using portable-pty
-//   2. We spawn `claw` with the slave end as its stdio
-//   3. We relay PTY output → WebSocket and WebSocket input → PTY
-//   4. We handle resize events: {"type":"resize","cols":N,"rows":N}
-//   5. Raw text / binary frames are forwarded as terminal input
-//
-// Chat panel routing (added for hybrid UI):
-//   When the user sends a message (ClientMessage::Input), we set a flag
-//   and route ANSI-stripped PTY text as {"type":"chat_text","text":"..."} frames.
-//   When the claw REPL prompt ("> ") appears in the PTY stream, we emit
-//   {"type":"chat_end"} and stop accumulating until the next user input.
+// Design:
+//   1. Spawn `claw --dangerously-skip-permissions [--model M]` with piped
+//      stdin, stdout, and stderr (no PTY).
+//   2. stdin: we write one line per user message ("text\n").
+//      claw's input.rs detects stdin is not a terminal and falls back to
+//      plain read_line() — no carriage-return tricks required.
+//   3. stdout: we read chunks and forward them as:
+//      a. Binary frames for xterm.js (raw bytes, ANSI included).
+//      b. {"type":"chat_text","text":"..."} JSON frames (ANSI-stripped)
+//         for the chat panel.
+//   4. Turn detection: accumulated ANSI-stripped output contains "✨ Done"
+//      AND ends with "> " (the read_line_fallback prompt).
+//      On detection we emit {"type":"chat_end"}.
+//   5. stderr: drained and logged at debug level.
+//   6. broker_rx: drained without forwarding (no PTY terminal to write to).
+//   7. Permission prompts suppressed via --dangerously-skip-permissions.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,8 +26,9 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::{SinkExt, StreamExt};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::error::{AppError, Result};
@@ -39,10 +43,7 @@ use crate::session::broker::now_secs;
 const OSC_PREFIX: &[u8] = b"\x1b]99;";
 const OSC_BEL: u8 = 0x07;
 
-/// Split raw PTY bytes into (clean_terminal_bytes, extracted_envelopes).
-/// `buf` is a carry-over buffer; call this with the same `buf` on every chunk
-/// so that OSC sequences spanning two read calls are handled correctly.
-fn split_pty_output(raw: &[u8], buf: &mut Vec<u8>) -> (Vec<u8>, Vec<serde_json::Value>) {
+fn split_output(raw: &[u8], buf: &mut Vec<u8>) -> (Vec<u8>, Vec<serde_json::Value>) {
     buf.extend_from_slice(raw);
     let mut clean = Vec::new();
     let mut envelopes: Vec<serde_json::Value> = Vec::new();
@@ -149,13 +150,15 @@ fn strip_ansi(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Returns true when `text` (ANSI-stripped) ends with the claw REPL prompt
-/// `> ` on a new line — indicating Claude has finished and is awaiting input.
-fn ends_with_repl_prompt(text: &str) -> bool {
-    // The claw REPL prompt is "> " (from LineEditor::new("> ", ...)).
-    // After a response, the PTY will contain "...response text\r\n> " or similar.
-    let t = text.trim_end_matches(' ');
-    t.ends_with("\n>") || t.ends_with("\r>") || t == ">"
+/// Returns true when claw has finished its turn and is back at the REPL prompt.
+///
+/// In pipe (non-TTY) mode, Spinner::finish writes "✔ ✨ Done\n" and the REPL
+/// loop calls read_line_fallback which writes "> " and flushes before blocking
+/// on stdin. So the last bytes we see before claw goes silent are "> ".
+///
+/// We confirm with "✨ Done" to avoid false triggers from "> " inside AI text.
+fn is_turn_complete(text: &str) -> bool {
+    text.contains("\u{2728} Done") && text.ends_with("> ")
 }
 
 /// Map an image file extension to a MIME type for the data-URL.
@@ -183,7 +186,9 @@ enum ClientMessage {
     Resize { cols: u16, rows: u16 },
 }
 
-/// Spawn `claw` on a PTY and bridge its I/O to the WebSocket.
+/// Spawn `claw` with piped stdio and bridge its I/O to the WebSocket.
+/// The function signature is identical to the old PTY-based version so
+/// `ws.rs` requires no changes.
 pub async fn run_pty_session(
     ws: WebSocket,
     claw_bin: PathBuf,
@@ -194,119 +199,117 @@ pub async fn run_pty_session(
     last_input_at: Arc<AtomicU64>,
     mut broker_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
-    let pty_system = native_pty_system();
+    use std::process::Stdio;
 
-    let pty_pair = pty_system
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| AppError::Session(format!("failed to open PTY: {e}")))?;
-
-    // Build claw command
-    let mut cmd = CommandBuilder::new(&claw_bin);
+    let mut cmd = tokio::process::Command::new(&claw_bin);
+    cmd.arg("--dangerously-skip-permissions");
     if let Some(ref m) = model {
         cmd.arg("--model");
         cmd.arg(m);
     }
-    cmd.cwd(&workspace);
+    cmd.current_dir(&workspace);
+    // Start with a clean environment; forward only what we explicitly provide.
+    cmd.env_clear();
     cmd.env("CLAW_CONFIG_HOME", config_home.display().to_string());
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
-    // ── DEBUG: log what we're about to exec ───────────────────────────────
     tracing::info!(
-        bin  = %claw_bin.display(),
+        bin = %claw_bin.display(),
         model = ?model,
         workspace = %workspace.display(),
-        xai_key_forwarded = env_vars.iter().any(|(k,_)| k == "XAI_API_KEY"),
-        "PTY: spawning claw"
+        xai_key_forwarded = env_vars.iter().any(|(k, _)| k == "XAI_API_KEY"),
+        "pipe: spawning claw"
     );
 
-    let mut child = pty_pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| AppError::Session(format!("failed to spawn claw on PTY: {e}")))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Session(format!("failed to spawn claw: {e}")))?;
 
-    // Wrap the master writer behind an Arc<Mutex> so we can share it across tasks
-    let master_writer = Arc::new(Mutex::new(
-        pty_pair
-            .master
-            .take_writer()
-            .map_err(|e| AppError::Session(format!("PTY writer error: {e}")))?,
-    ));
+    let child_stdin = child.stdin.take().expect("stdin piped");
+    let child_stdout = child.stdout.take().expect("stdout piped");
+    let child_stderr = child.stderr.take().expect("stderr piped");
 
-    // Clone the master for reading (blocking — run in a background thread)
-    let master_reader = pty_pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| AppError::Session(format!("PTY reader error: {e}")))?;
-
+    let stdin = Arc::new(Mutex::new(child_stdin));
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
-    // ── Chat routing state ─────────────────────────────────────────────────
-    // `chat_active`: true while we're waiting for Claude's response.
-    // `ctrl_tx`: sends chat control frames (chat_start) from the input loop
-    //            to the pty_to_ws task, which owns ws_sender.
+    // State: is there an active AI turn we are routing to the chat panel?
     let chat_active = Arc::new(AtomicBool::new(false));
-    let chat_active_pty = Arc::clone(&chat_active);
-    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(8);
+    let chat_active_out = Arc::clone(&chat_active);
 
-    // Task: broker → PTY (watchdog warnings, teacher messages)
-    let broker_writer = Arc::clone(&master_writer);
-    let broker_fwd = tokio::spawn(async move {
-        while let Some(data) = broker_rx.recv().await {
-            let mut w = broker_writer.lock().await;
-            let _ = w.write_all(&data);
+    // Channel: input-loop → stdout-task for control frames (chat_start).
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(16);
+
+    // Drain broker_rx — watchdog/teacher messages written to PTY in the old
+    // design have no equivalent target in pipe mode.
+    tokio::spawn(async move {
+        while broker_rx.recv().await.is_some() {}
+    });
+
+    // Drain stderr; log at debug level so we can diagnose claw errors.
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(child_stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::debug!(target: "claw_stderr", "{}", line);
         }
     });
 
-    // Task: PTY output → WebSocket  (also handles chat_text routing)
     let osc_workspace = workspace.clone();
-    let pty_to_ws = tokio::spawn(async move {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
-        std::thread::spawn(move || {
-            let mut reader = master_reader;
-            let mut buf = [0u8; 4096];
-            loop {
-                match std::io::Read::read(&mut reader, &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
+    // --- Task: stdout → WebSocket -----------------------------------------
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(child_stdout);
+        let mut raw_buf = [0u8; 4096];
         let mut osc_buf: Vec<u8> = Vec::new();
-        // Accumulator for ANSI-stripped text during an AI turn.
+        // Accumulates ANSI-stripped text for the current turn, used for
+        // end-of-turn detection.
         let mut chat_clean_buf = String::new();
 
         'outer: loop {
             tokio::select! {
-                // Forward chat control frames (chat_start) from the input loop.
+                // Forward chat control frames (chat_start) sent by the input loop.
                 Some(ctrl_msg) = ctrl_rx.recv() => {
                     if ws_sender.send(Message::Text(ctrl_msg)).await.is_err() {
                         break 'outer;
                     }
                 }
-                // Process PTY output bytes.
-                Some(data) = rx.recv() => {
-                    let (clean, envelopes) = split_pty_output(&data, &mut osc_buf);
 
-                    // ── Chat panel routing ──────────────────────────────
-                    if chat_active_pty.load(Ordering::Relaxed) && !clean.is_empty() {
-                        let text_chunk = strip_ansi(
-                            &String::from_utf8_lossy(&clean)
-                        );
+                // Read a chunk of stdout from claw.
+                result = reader.read(&mut raw_buf) => {
+                    let n = match result {
+                        Ok(0) | Err(_) => break 'outer,
+                        Ok(n) => n,
+                    };
+
+                    let (clean, envelopes) = split_output(&raw_buf[..n], &mut osc_buf);
+
+                    // Always forward raw bytes to xterm.js (terminal panel).
+                    if !clean.is_empty()
+                        && ws_sender
+                            .send(Message::Binary(clean.clone().into()))
+                            .await
+                            .is_err()
+                    {
+                        break 'outer;
+                    }
+
+                    // Chat panel routing while a turn is active.
+                    if chat_active_out.load(Ordering::Relaxed) && !clean.is_empty() {
+                        let raw_str = String::from_utf8_lossy(&clean).into_owned();
+                        let text_chunk = strip_ansi(&raw_str);
+
                         if !text_chunk.is_empty() {
                             chat_clean_buf.push_str(&text_chunk);
 
-                            // Stream the chunk to the chat panel.
+                            // Stream the stripped chunk to the chat panel.
                             let frame = serde_json::json!({
                                 "type": "chat_text",
-                                "text": text_chunk
+                                "text": text_chunk,
                             });
                             if let Ok(json) = serde_json::to_string(&frame) {
                                 if ws_sender.send(Message::Text(json)).await.is_err() {
@@ -314,62 +317,60 @@ pub async fn run_pty_session(
                                 }
                             }
 
-                            // Detect the claw REPL prompt: turn is over.
-                            if ends_with_repl_prompt(&chat_clean_buf) {
-                                chat_active_pty.store(false, Ordering::Relaxed);
+                            // Detect turn completion and notify the frontend.
+                            if is_turn_complete(&chat_clean_buf) {
+                                chat_active_out.store(false, Ordering::Relaxed);
                                 chat_clean_buf.clear();
-                                let end_frame = r#"{"type":"chat_end"}"#.to_string();
-                                if ws_sender.send(Message::Text(end_frame)).await.is_err() {
+                                if ws_sender
+                                    .send(Message::Text(
+                                        r#"{"type":"chat_end"}"#.to_string(),
+                                    ))
+                                    .await
+                                    .is_err()
+                                {
                                     break 'outer;
                                 }
                             }
                         }
                     }
 
-                    // ── Always forward raw PTY bytes to xterm.js ────────
-                    if !clean.is_empty()
-                        && ws_sender
-                            .send(Message::Binary(clean.into()))
-                            .await
-                            .is_err()
-                    {
-                        break 'outer;
-                    }
-
-                    // ── Forward OSC envelopes as JSON frames ────────────
+                    // Forward any OSC envelopes (show_image, etc.).
                     for env in envelopes {
-                        let json_msg =
-                            if env.get("type").and_then(|t| t.as_str()) == Some("show_image") {
-                                let path_str = match env
-                                    .get("payload")
-                                    .and_then(|p| p.get("path"))
-                                    .and_then(|p| p.as_str())
-                                {
-                                    Some(s) => s.to_owned(),
-                                    None => continue,
-                                };
-                                let img_path = if Path::new(&path_str).is_absolute() {
-                                    PathBuf::from(&path_str)
-                                } else {
-                                    osc_workspace.join(&path_str)
-                                };
-                                match tokio::fs::read(&img_path).await {
-                                    Ok(bytes) => serde_json::json!({
-                                        "type": "show_image",
-                                        "payload": {
-                                            "path": path_str,
-                                            "data_url": format!(
-                                                "data:{};base64,{}",
-                                                mime_for_image(&img_path),
-                                                STANDARD.encode(&bytes)
-                                            )
-                                        }
-                                    }),
-                                    Err(_) => continue,
-                                }
-                            } else {
-                                env
+                        let json_msg = if env
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            == Some("show_image")
+                        {
+                            let path_str = match env
+                                .get("payload")
+                                .and_then(|p| p.get("path"))
+                                .and_then(|p| p.as_str())
+                            {
+                                Some(s) => s.to_owned(),
+                                None => continue,
                             };
+                            let img_path = if Path::new(&path_str).is_absolute() {
+                                PathBuf::from(&path_str)
+                            } else {
+                                osc_workspace.join(&path_str)
+                            };
+                            match tokio::fs::read(&img_path).await {
+                                Ok(bytes) => serde_json::json!({
+                                    "type": "show_image",
+                                    "payload": {
+                                        "path": path_str,
+                                        "data_url": format!(
+                                            "data:{};base64,{}",
+                                            mime_for_image(&img_path),
+                                            STANDARD.encode(&bytes)
+                                        )
+                                    }
+                                }),
+                                Err(_) => continue,
+                            }
+                        } else {
+                            env
+                        };
 
                         if let Ok(text) = serde_json::to_string(&json_msg) {
                             if ws_sender.send(Message::Text(text)).await.is_err() {
@@ -378,12 +379,13 @@ pub async fn run_pty_session(
                         }
                     }
                 }
+
                 else => break 'outer,
             }
         }
     });
 
-    // Main loop: WebSocket input → PTY
+    // --- Main loop: WebSocket input → claw stdin --------------------------
     while let Some(msg) = ws_receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
@@ -391,41 +393,44 @@ pub async fn run_pty_session(
                     match client_msg {
                         ClientMessage::Input { data } => {
                             last_input_at.store(now_secs(), Ordering::Relaxed);
-                            // Signal chat panel: Claude is about to respond.
                             if !data.trim().is_empty() {
                                 chat_active.store(true, Ordering::Relaxed);
                                 let _ = ctrl_tx
                                     .send(r#"{"type":"chat_start"}"#.to_string())
                                     .await;
                             }
-                            let mut w = master_writer.lock().await;
-                            let _ = w.write_all(data.as_bytes());
+                            // Ensure the line ends with a newline so claw's
+                            // read_line_fallback returns immediately.
+                            let mut line = data;
+                            if !line.ends_with('\n') {
+                                line.push('\n');
+                            }
+                            let mut w = stdin.lock().await;
+                            if w.write_all(line.as_bytes()).await.is_err() {
+                                break;
+                            }
                         }
-                        ClientMessage::Resize { cols, rows } => {
-                            let _ = pty_pair.master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
+                        ClientMessage::Resize { .. } => {
+                            // No PTY: resize messages are silently ignored.
                         }
                     }
                 }
-                // Unknown JSON frames (e.g. {"type":"ping"}) are intentionally dropped.
+                // Unknown frames (ping, etc.) are silently dropped.
             }
             Ok(Message::Binary(bytes)) => {
+                // Raw binary input: write directly to claw's stdin.
                 last_input_at.store(now_secs(), Ordering::Relaxed);
-                let mut w = master_writer.lock().await;
-                let _ = w.write_all(&bytes);
+                let mut w = stdin.lock().await;
+                if w.write_all(&bytes).await.is_err() {
+                    break;
+                }
             }
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
         }
     }
 
-    broker_fwd.abort();
-    pty_to_ws.abort();
-    let _ = child.kill();
-
+    stdout_task.abort();
+    let _ = child.kill().await;
     Ok(())
 }
