@@ -87,6 +87,38 @@ async fn create_session(
     dirs.create_all()
         .map_err(|e| AppError::Session(format!("failed to create session dirs: {e}")))?;
 
+    // Write student context as a claw instruction file into the upper (persistent) layer.
+    // This must happen before claw starts because claw reads instructions.md while building
+    // the system prompt — BEFORE plugin lifecycle hooks (init.sh) run.
+    // Writing to upper/ directly means it appears in merged/ after OverlayFS mounts.
+    {
+        let display_name = if student.display_name.trim().is_empty() {
+            student.username.clone()
+        } else {
+            student.display_name.clone()
+        };
+        let workspace_path = dirs.merged.display().to_string();
+        let mut lines = vec![
+            format!("You are an AI tutor for {}.", display_name),
+            format!("Your workspace is at: {workspace_path}"),
+            format!("Session ID: {session_id}"),
+        ];
+        if !student.cohort_id.is_empty() {
+            lines.push(format!("Cohort ID: {}", student.cohort_id));
+        }
+        lines.extend_from_slice(&[
+            String::new(),
+            "Guide the student — ask Socratic questions rather than giving direct answers.".to_string(),
+            "Use your tools to discover what subjects and assignments are available when asked.".to_owned(),
+        ]);
+        let instructions = lines.join("\n") + "\n";
+        let claw_dir = dirs.upper.join(".claw");
+        std::fs::create_dir_all(&claw_dir)
+            .map_err(|e| AppError::Session(format!("failed to create .claw dir: {e}")))?;
+        std::fs::write(claw_dir.join("instructions.md"), instructions)
+            .map_err(|e| AppError::Session(format!("failed to write instructions.md: {e}")))?;
+    }
+
     // Per-session plugin copy
     install_plugin(&state.plugin_path, &dirs.plugin)
         .map_err(|e| AppError::Session(format!("failed to install plugin: {e}")))?;
@@ -144,6 +176,11 @@ async fn create_session(
         "subject_ids":  subject_ids,
         "session_id":   session_id,
     }).to_string();
+
+    // Write student.json to config dir so ws.rs can forward EDUCLAW_STUDENT_JSON
+    // to the interactive PTY spawn (the one the student actually types into).
+    std::fs::write(dirs.config.join("student.json"), &student_json)
+        .map_err(|e| AppError::Session(format!("failed to write student.json: {e}")))?;
 
     // Persist session record
     let session = Session {

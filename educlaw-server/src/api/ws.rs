@@ -77,6 +77,22 @@ async fn session_ws(
             ("EDUCLAW_WORKSPACE".to_string(), dirs.merged.display().to_string()),
         ];
 
+        // Forward EDUCLAW_STUDENT_JSON so init.sh can write the student's instruction
+        // file (.claw/instructions.md). This blob was persisted to student.json by
+        // create_session because ws.rs doesn't have the full student data in scope.
+        match std::fs::read_to_string(dirs.config.join("student.json")) {
+            Ok(blob) => env_vars.push(("EDUCLAW_STUDENT_JSON".to_string(), blob)),
+            Err(e) => tracing::warn!(session_id = %sid, error = %e, "could not read student.json; init.sh will skip prompt injection"),
+        }
+
+        // Forward MCP socket and internal token if configured.
+        if let Ok(val) = std::env::var("EDUCLAW_MCP_SOCKET") {
+            env_vars.push(("EDUCLAW_MCP_SOCKET".to_string(), val));
+        }
+        if let Ok(val) = std::env::var("EDUCLAW_INTERNAL_TOKEN") {
+            env_vars.push(("EDUCLAW_INTERNAL_TOKEN".to_string(), val));
+        }
+
         // Forward essential env vars to claw's process.
         // tokio::process::Command inherits the parent's env unless env_clear() is called;
         // we call env_clear() in run_pty_session so we must forward everything needed.

@@ -75,9 +75,12 @@ lines += [
 
 system_prompt = "\n".join(lines)
 
+# The student context (instructions.md) is written by educlaw-server into the
+# upper layer BEFORE claw starts, so it is present when claw builds its system prompt.
+# init.sh only needs to write settings.json (permissionMode, mcpServers).
+
 settings = {
     "permissionMode": "danger-full-access",
-    "systemPrompt": system_prompt,
 }
 
 if mcp_socket:
