@@ -54,7 +54,8 @@ async fn session_ws(
         )));
     }
 
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
+    // The mount was already done in create_session; we only need the ephemeral paths.
+    let dirs = SessionDirs::for_existing_session(&state.workspace_root, &session_id);
     let claw_bin = state.claw_bin.clone();
     let broker = Arc::clone(&state.broker);
     let sid = session_id.clone();

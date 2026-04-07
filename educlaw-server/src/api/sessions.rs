@@ -64,7 +64,24 @@ async fn create_session(
         .ok_or_else(|| AppError::NotFound(format!("student {} not found", body.student_id)))?;
 
     let session_id = Uuid::new_v4().to_string();
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
+
+    // lower = {subjects_root}/{cohort_id}/{...subject slugs...} — read-only via OverlayFS
+    //   cohort.id is a slug (e.g. "primary-2b"), not a UUID — already human-readable.
+    // upper = {students_root}/{username}/ — student persistent home, read-write.
+    //   username is unique and human-readable; the agent sees paths like
+    //   /srv/educlaw/data/students/alice/ instead of an opaque UUID.
+    let lower = if student.cohort_id.is_empty() {
+        // No cohort assigned: fall back to an empty dir so OverlayFS still mounts cleanly.
+        let fallback = std::path::PathBuf::from(&state.subjects_root).join("_empty");
+        std::fs::create_dir_all(&fallback)
+            .map_err(|e| AppError::Session(format!("failed to create fallback lower dir: {e}")))?;
+        fallback
+    } else {
+        std::path::PathBuf::from(&state.subjects_root).join(&student.cohort_id)
+    };
+    let upper = std::path::PathBuf::from(&state.students_root).join(&student.username);
+
+    let dirs = SessionDirs::new(&state.workspace_root, &session_id, lower, upper);
 
     // Prepare filesystem layout
     dirs.create_all()
@@ -250,7 +267,7 @@ async fn terminate_session(
     }
 
     // Best-effort overlay unmount
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
+    let dirs = SessionDirs::for_existing_session(&state.workspace_root, &session_id);
     umount_overlay(&dirs.merged).await;
 
     db_sess::set_session_state(&state.pool, &session_id, "ended").await?;

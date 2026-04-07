@@ -30,8 +30,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{bearer_token, Claims};
+use crate::db::students;
 use crate::error::{AppError, Result};
-use crate::session::dirs::SessionDirs;
 
 use super::AppState;
 
@@ -191,6 +191,17 @@ fn mime_guess(path: &Path) -> &'static str {
     }
 }
 
+// ── Student home dir resolver ────────────────────────────────────────────
+
+/// Resolve `{students_root}/{username}` from the JWT `sub` claim (student UUID).
+/// This is the OverlayFS upper layer — the student's persistent home.
+async fn student_home_dir(state: &AppState, student_id: &str) -> Result<PathBuf> {
+    let student = students::get_student(&state.pool, student_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("student {student_id} not found")))?;
+    Ok(PathBuf::from(&state.students_root).join(&student.username))
+}
+
 // ── Subject routes ────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -207,9 +218,7 @@ async fn list_subject_files(
     let subject_id = validate_id(&subject_id, "subject_id")?;
     assert_subject_access(&claims, &subject_id)?;
 
-    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
-        .unwrap_or_else(|_| "/data/subjects".to_string());
-    let base = PathBuf::from(&subjects_root).join(&claims.cohort_id).join(&subject_id);
+    let base = PathBuf::from(&state.subjects_root).join(&claims.cohort_id).join(&subject_id);
 
     if !base.exists() {
         return Err(AppError::NotFound(format!("subject {subject_id} not found")));
@@ -229,9 +238,7 @@ async fn read_subject_file(
     let subject_id = validate_id(&subject_id, "subject_id")?;
     assert_subject_access(&claims, &subject_id)?;
 
-    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
-        .unwrap_or_else(|_| "/data/subjects".to_string());
-    let base = PathBuf::from(&subjects_root).join(&claims.cohort_id).join(&subject_id);
+    let base = PathBuf::from(&state.subjects_root).join(&claims.cohort_id).join(&subject_id);
     let path = safe_join(&base, &rel_path)?;
 
     file_response(&path)
@@ -248,13 +255,13 @@ async fn list_student(
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
 
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
+    let upper = student_home_dir(&state, &claims.sub).await?;
 
-    if !dirs.upper.exists() {
+    if !upper.exists() {
         return Ok(Json(vec![]));
     }
 
-    Ok(Json(build_tree(&dirs.upper, "")))
+    Ok(Json(build_tree(&upper, "")))
 }
 
 async fn read_student_file(
@@ -268,8 +275,8 @@ async fn read_student_file(
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
 
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
-    let path = safe_join(&dirs.upper, &rel_path)?;
+    let upper = student_home_dir(&state, &claims.sub).await?;
+    let path = safe_join(&upper, &rel_path)?;
     file_response(&path)
 }
 
@@ -290,8 +297,8 @@ async fn write_student_file(
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
 
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
-    let path = safe_join(&dirs.upper, &rel_path)?;
+    let upper = student_home_dir(&state, &claims.sub).await?;
+    let path = safe_join(&upper, &rel_path)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -311,8 +318,8 @@ async fn delete_student_file(
     let session_id = validate_id(&session_id, "session_id")?;
     assert_session_access(&claims, &session_id)?;
 
-    let dirs = SessionDirs::new(&state.workspace_root, &session_id);
-    let path = safe_join(&dirs.upper, &rel_path)?;
+    let upper = student_home_dir(&state, &claims.sub).await?;
+    let path = safe_join(&upper, &rel_path)?;
 
     if path.is_dir() {
         std::fs::remove_dir_all(&path)?;

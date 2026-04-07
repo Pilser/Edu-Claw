@@ -26,6 +26,13 @@ pub struct AppState {
     pub plugin_path: String,
     pub claw_bin: String,
     pub broker: Arc<SessionBroker>,
+    /// Root dir containing subject dirs: `{subjects_root}/{cohort_id}/{slug}/`
+    /// This is the OverlayFS lower layer — cohort course materials, read-only.
+    /// Matches the disk layout defined in the `subjects` DB table.
+    pub subjects_root: String,
+    /// Root dir containing one sub-dir per student: `{students_root}/{student_id}/`
+    /// This is the OverlayFS upper layer — student persistent home, read-write.
+    pub students_root: String,
 }
 
 impl AppState {
@@ -36,8 +43,10 @@ impl AppState {
         plugin_path: String,
         claw_bin: String,
         broker: Arc<SessionBroker>,
+        subjects_root: String,
+        students_root: String,
     ) -> Self {
-        Self { pool, auth, workspace_root, plugin_path, claw_bin, broker }
+        Self { pool, auth, workspace_root, plugin_path, claw_bin, broker, subjects_root, students_root }
     }
 }
 

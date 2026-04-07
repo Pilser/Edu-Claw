@@ -64,12 +64,25 @@ async fn main() -> anyhow::Result<()> {
 
     let claw_bin = std::env::var("CLAW_BIN").unwrap_or_else(|_| "claw".to_string());
 
+    // Root dir for subject content: {subjects_root}/{cohort_id}/{slug}/
+    // Matches the disk layout defined in the `subjects` DB table.
+    // This becomes the OverlayFS lower layer for each session.
+    let subjects_root = std::env::var("EDUCLAW_SUBJECTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/subjects".to_string());
+    std::fs::create_dir_all(&subjects_root)?;
+
+    // Root dir holding one sub-dir per student: {students_root}/{student_id}/
+    // This is the OverlayFS upper layer — student persistent home, read-write.
+    let students_root = std::env::var("EDUCLAW_STUDENTS_ROOT")
+        .unwrap_or_else(|_| "/srv/educlaw/data/students".to_string());
+    std::fs::create_dir_all(&students_root)?;
+
     let broker = SessionBroker::new();
 
     let web_root = std::env::var("EDUCLAW_WEB_ROOT")
         .unwrap_or_else(|_| "./educlaw-web/dist".to_string());
 
-    let state = api::AppState::new(pool, auth_config, workspace_root, plugin_path, claw_bin, broker);
+    let state = api::AppState::new(pool, auth_config, workspace_root, plugin_path, claw_bin, broker, subjects_root, students_root);
 
     let app = Router::new()
         .merge(api::routes())
