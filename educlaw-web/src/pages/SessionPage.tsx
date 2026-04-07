@@ -86,26 +86,7 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
     ))
   }, [])
 
-  const handleToolResult = useCallback((text: string) => {
-    const id = pendingMsgIdRef.current
-    if (!id) return
-    setMessages(prev => prev.map(m => {
-      if (m.id !== id) return m
-      const lastIdx = m.segments.reduce<number>(
-        (acc, seg, i) => (seg.kind === 'tool' && !seg.done ? i : acc), -1
-      )
-      if (lastIdx === -1) return m
-      const segs = m.segments.map((seg, i) => {
-        if (i === lastIdx && seg.kind === 'tool') {
-          return { kind: 'tool' as const, tool: seg.tool, command: seg.command, exitCode: seg.exitCode, done: false, output: seg.output + text }
-        }
-        return seg
-      })
-      return { ...m, segments: segs }
-    }))
-  }, [])
-
-  const handleToolEnd = useCallback((exitCode: number) => {
+  const handleToolEnd = useCallback((exitCode: number, stdout: string, stderr: string) => {
     const id = pendingMsgIdRef.current
     if (!id) return
     setMessages(prev => prev.map(m => {
@@ -117,7 +98,8 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
       if (lastIdx === -1) return m
       const segs = m.segments.map((seg, i) => {
         if (i === lastIdx && seg.kind === 'tool') {
-          return { kind: 'tool' as const, tool: seg.tool, command: seg.command, exitCode, done: true, output: seg.output }
+          const output = (stdout + (stderr ? '\n[stderr]\n' + stderr : '')).trimEnd()
+          return { kind: 'tool' as const, tool: seg.tool, command: seg.command, exitCode, done: true, output }
         }
         return seg
       })
@@ -152,14 +134,13 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
     setAiTyping(false)
   }, [])
 
-  const { status, sendInput, sendResize } = useWebSocket({
+  const { status, sendInput, sendResize, sendCancel } = useWebSocket({
     sessionId:       session.session_id,
     token:           session.token,
     onPtyData:       handlePtyData,
     onImage:         handleImage,
     onChatStart:     handleChatStart,
     onToolStart:     handleToolStart,
-    onToolResult:    handleToolResult,
     onToolEnd:       handleToolEnd,
     onAssistantText: handleAssistantText,
     onChatEnd:       handleChatEnd,
@@ -262,6 +243,7 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
               inputValue={chatInput}
               onInputChange={setChatInput}
               onSend={handleSendWithWs}
+              onCancel={sendCancel}
               disabled={status !== 'connected' || aiTyping}
             />
           </div>

@@ -1,6 +1,6 @@
-# Edu-Claw Change Log
+# Claw Change Log
 
-All significant changes made to the Edu-Claw project.
+All significant changes made to the Claw Source code
 
 ---
 
@@ -18,26 +18,6 @@ claw always routed requests to `api.anthropic.com` regardless of which model was
 - Changed `AnthropicRuntimeClient::new()` to use `ProviderClient::from_model_with_anthropic_auth(&model, Some(resolve_cli_auth_source()?))`
 - Updated `push_prompt_cache_record` signature from `&AnthropicClient` → `&ProviderClient`
 
-### Fix — `Edu-Claw/claw.sh` (NEW FILE)
-claw's startup always calls `resolve_startup_auth_source()` which requires an Anthropic API key even when using xAI. The wrapper satisfies this gate without sending the fake key to xAI:
-
-```sh
-#!/usr/bin/env bash
-set -a
-source "$(dirname "$0")/.env"
-set +a
-export XAI_API_KEY
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-not-needed-using-xai}"
-MODEL="${CLAW_MODEL:-grok-3}"
-exec "$(dirname "$0")/claw" --model "$MODEL" "$@"
-```
-
-### Fix — `Edu-Claw/.env`
-```
-XAI_API_KEY=xai-<key>
-CLAW_BIN=/home/pilser/Edu-Claw/claw
-# CLAW_MODEL=grok-3   ← commented out; override at runtime with /model in REPL
-```
 
 ---
 
@@ -72,66 +52,64 @@ Grok reads its own system prompt and reports that as its identity. No Anthropic 
 - Passes `Some(model)` to `load_system_prompt_for_model`
 - Updated `LiveCli::new()` to call `build_system_prompt(&model)`
 
-### Result
-```
-$ ./claw.sh --output-format json prompt "what model are you, in one sentence"
-{"message":"I'm Grok-3, a large language model developed by xAI.",...}
-```
-
 ---
 
-## AI-Only Essay Grading (No Keyword Fallback)
+## Structured OSC Output Events
 
 ### Problem
-`grade_essay_maybe_ai` had an env var gate (`ENABLE_AI_GRADING`) and silently fell back to keyword matching when AI was unavailable. This meant grading could pass without AI involvement.
+No machine-readable contract existed between claw and downstream consumers.
+Structured data (tool name, command, stdout, exit code, turn boundaries) was
+only available as visual terminal art and had to be reverse-engineered.
 
-### Fix — `educlaw-mcp/src/servers/eval_engine/checker.rs`
-- Removed `grade_essay_maybe_ai`
-- Added `grade_essay_ai` — always calls AI, returns `score: 0, hint: "Grading temporarily unavailable"` on failure (no fallback)
-- Added `try_ai_grade` — spawns `$CLAW_BIN --model $CLAW_MODEL --output-format json prompt "..."` and parses JSON response
-- Added `ClawJsonOutput` and `AiGradeResult` structs for JSON deserialization
+### Fix — `claw-code/crates/rusty-claude-cli/src/main.rs`
 
-### Fix — `educlaw-mcp/src/servers/eval_engine/mod.rs`
-- Import and call site updated from `grade_essay_maybe_ai` → `grade_essay_ai`
+Added two helpers just after the `DEFAULT_MODEL` constant:
 
----
+- **`educlaw_structured() -> bool`** — returns `true` when
+  `EDUCLAW_STRUCTURED_OUTPUT=1` is set in the environment.
+- **`osc_emit(payload: &serde_json::Value)`** — writes an OSC 99 envelope
+  (`\x1b]99;{json}\x07`) to stdout and flushes. Same sentinel format already
+  used by the Python shell wrapper. No-op when `educlaw_structured()` is false.
 
-## Chat UI — SessionPage & ChatPanel
+Three call sites added:
 
-### Fix — `educlaw-web/src/pages/SessionPage.tsx` (REWRITE)
-Previous layout had PTY terminal as the primary panel. Rewritten to:
-- Chat panel as the primary view (centre)
-- File tree collapsible sidebar (left)
-- Assignment panel (right)
-- Terminal collapsible at the bottom (always mounted, CSS `h-0`/`h-64` transition so PTY stays live)
-- State: `messages: ChatMessage[]`, `chatInput`, `aiTyping`, `terminalOpen`
-- Callbacks: `handleChatStart`, `handleChatText`, `handleChatEnd` for streaming frames
-- `handleSendWithWs` sends text to PTY and appends user bubble
-
-### Fix — `educlaw-web/src/components/ChatPanel.tsx` (NEW FILE)
-Full markdown streaming chat component:
-- `react-markdown` + `remark-gfm` for rich text
-- `react-syntax-highlighter` (Prism / oneDark theme) for code blocks
-- Streaming cursor while AI is typing
-- Auto-scroll on new messages
-- Auto-grow textarea, Enter to send
-
-### Fix — `educlaw-web/src/hooks/useWebSocket.ts`
-- Added `onChatStart`, `onChatText`, `onChatEnd` optional callbacks
-
-### Fix — `educlaw-web/src/api/types.ts`
-- Added `ChatMessage`, `ChatRole` types
-- Added `chat_start`, `chat_text`, `chat_end` WebSocket envelope types
+| Location | Envelope emitted |
+|---|---|
+| `run_turn()` — before `spinner.tick()` | `{"type":"thinking"}` |
+| `run_turn()` — after `spinner.finish()` (success) | `{"type":"chat_end"}` |
+| `run_turn()` — after `spinner.fail()` (error) | `{"type":"chat_error","message":"..."}` |
+| `format_tool_call_start(name, input)` | `{"type":"tool_start","tool":"bash","command":"python --version","input":{…}}` — command field is the bash `command` arg, or file path for read/write/edit, or pattern for glob/grep |
+| `format_tool_result(name, output, is_error)` | `{"type":"tool_end","tool":"bash","exit_code":0,"is_error":false,"stdout":"…","stderr":"…"}` — extracts `stdout`/`stderr` from the structured JSON that tool executors already return internally |
 
 ---
 
-## PTY Bridge — Chat Routing
+## Cancel Mid-Response (Graceful Stop)
 
-### Fix — `educlaw-server/src/pty_bridge.rs`
-- Added `strip_ansi()` — strips ANSI escape codes from PTY output
-- Added `ends_with_repl_prompt()` — detects when claw's REPL prompt is idle
-- Added `chat_active: Arc<AtomicBool>` flag and `ctrl_tx/rx` mpsc channel
-- `pty_to_ws` task uses `tokio::select!` to route frames as `chat_text` during active turns and raw PTY otherwise
+### Problem
+No way to interrupt a running AI turn without killing the claw process and
+losing the session.
 
-### Fix — `educlaw-mcp/src/server.rs`
-- `check_answer` now dispatches to async `check_answer_async`
+### Root Cause
+`HookAbortMonitor` only listened for OS `SIGINT` (Ctrl+C from a terminal).
+When claw runs with piped stdin under educlaw-server it never receives a
+terminal Ctrl+C event, so there was no way to trigger `abort_signal.abort()`
+mid-stream. Even if the signal arrived, `run_repl()` propagated the
+resulting error out of the loop with `?`, exiting the process.
+
+### Fix — `claw-code/crates/rusty-claude-cli/src/main.rs`
+
+- **`educlaw_cancel_flag()`** — `OnceLock<AtomicBool>` static added after
+  `osc_emit`. Reset to `false` at the start of every `run_turn()`.
+- **`HookAbortMonitor::spawn()`** — the `ctrl_c()` branch now also stores
+  `true` into `educlaw_cancel_flag` before calling `abort_signal.abort()`.
+  No separate stdin watcher thread (a `spawn_blocking` read cannot be
+  interrupted and would leak across turns).
+- **HTTP stream loop** — checks `educlaw_cancel_flag` on each event; returns
+  `RuntimeError::new("cancelled")` immediately when set.
+- **`run_turn()` error arm** — when the error message equals `"cancelled"`,
+  emits `{"type":"chat_end"}` instead of `{"type":"chat_error"}`.
+- **`run_repl()`** — `cli.run_turn(&trimmed)?` replaced with a `match` that
+  silently `continue`s the REPL loop on a `"cancelled"` error so the session
+  is preserved.
+
+

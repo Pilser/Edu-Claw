@@ -11,15 +11,8 @@ interface Props {
   inputValue: string
   onInputChange: (v: string) => void
   onSend: (text: string) => void
+  onCancel?: () => void
   disabled: boolean
-}
-
-// Convert claw's box-drawing code examples to proper markdown fenced blocks.
-// Pattern: ╭─ lang\n...content...\n╰─  →  ```lang\n...content...\n```
-function fixClawCodeBoxes(text: string): string {
-  return text.replace(/╭─ ([\w-]+)\n([\s\S]*?)╰─/g, (_m, lang: string, body: string) => {
-    return '```' + lang + '\n' + body + '```'
-  })
 }
 
 // Shared code-block renderer for ReactMarkdown.
@@ -45,7 +38,7 @@ function SegmentView({ seg }: { seg: MessageSegment }) {
   if (seg.kind === 'tool') return <ToolCallCard seg={seg} />
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: mdCode }}>
-      {fixClawCodeBoxes(seg.content)}
+      {seg.content}
     </ReactMarkdown>
   )
 }
@@ -92,7 +85,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   )
 }
 
-export default function ChatPanel({ messages, inputValue, onInputChange, onSend, disabled }: Props) {
+export default function ChatPanel({ messages, inputValue, onInputChange, onSend, onCancel, disabled }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -154,6 +147,15 @@ export default function ChatPanel({ messages, inputValue, onInputChange, onSend,
             onKeyDown={handleKeyDown}
             disabled={disabled}
           />
+          {disabled && onCancel && (
+            <button
+              onClick={onCancel}
+              className="shrink-0 w-10 h-10 rounded-xl bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-colors shadow-sm"
+              title="Stop (cancel current response)"
+            >
+              <span className="text-base">■</span>
+            </button>
+          )}
           <button
             onClick={doSend}
             disabled={disabled || !inputValue.trim()}

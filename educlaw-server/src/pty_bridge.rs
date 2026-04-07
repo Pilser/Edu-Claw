@@ -43,45 +43,6 @@ use crate::session::broker::now_secs;
 const OSC_PREFIX: &[u8] = b"\x1b]99;";
 const OSC_BEL: u8 = 0x07;
 
-fn split_output(raw: &[u8], buf: &mut Vec<u8>) -> (Vec<u8>, Vec<serde_json::Value>) {
-    buf.extend_from_slice(raw);
-    let mut clean = Vec::new();
-    let mut envelopes: Vec<serde_json::Value> = Vec::new();
-    let mut pos = 0;
-
-    loop {
-        match find_bytes(&buf[pos..], OSC_PREFIX) {
-            Some(start) => {
-                let abs_start = pos + start;
-                clean.extend_from_slice(&buf[pos..abs_start]);
-                let body_start = abs_start + OSC_PREFIX.len();
-                match buf[body_start..].iter().position(|&b| b == OSC_BEL) {
-                    Some(bel_offset) => {
-                        let body = &buf[body_start..body_start + bel_offset];
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) {
-                            envelopes.push(val);
-                        }
-                        pos = body_start + bel_offset + 1;
-                    }
-                    None => {
-                        // BEL not yet received; keep everything from abs_start
-                        let remaining = buf[abs_start..].to_vec();
-                        *buf = remaining;
-                        return (clean, envelopes);
-                    }
-                }
-            }
-            None => {
-                // No prefix found, but the tail might be a partial prefix
-                let safe_len = safe_output_len(&buf[pos..]);
-                clean.extend_from_slice(&buf[pos..pos + safe_len]);
-                *buf = buf[pos + safe_len..].to_vec();
-                return (clean, envelopes);
-            }
-        }
-    }
-}
-
 /// Find the first occurrence of `needle` in `haystack`.
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
@@ -100,6 +61,57 @@ fn safe_output_len(data: &[u8]) -> usize {
         }
     }
     data.len()
+}
+
+/// A positionally-ordered output event from a single read chunk.
+/// Unlike `split_output` which returns (all_clean, all_envelopes), this
+/// preserves the interleaved order so that `inside_tool` state can be
+/// tracked correctly even when OSC envelopes and clean bytes land in the
+/// same read() call.
+enum OutputChunk {
+    Clean(Vec<u8>),
+    Envelope(serde_json::Value),
+}
+
+fn split_output_ordered(raw: &[u8], buf: &mut Vec<u8>) -> Vec<OutputChunk> {
+    buf.extend_from_slice(raw);
+    let mut result = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        match find_bytes(&buf[pos..], OSC_PREFIX) {
+            Some(start) => {
+                let abs_start = pos + start;
+                if abs_start > pos {
+                    result.push(OutputChunk::Clean(buf[pos..abs_start].to_vec()));
+                }
+                let body_start = abs_start + OSC_PREFIX.len();
+                match buf[body_start..].iter().position(|&b| b == OSC_BEL) {
+                    Some(bel_offset) => {
+                        let body = &buf[body_start..body_start + bel_offset];
+                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(body) {
+                            result.push(OutputChunk::Envelope(val));
+                        }
+                        pos = body_start + bel_offset + 1;
+                    }
+                    None => {
+                        // BEL not yet received; hold from abs_start onward.
+                        let remaining = buf[abs_start..].to_vec();
+                        *buf = remaining;
+                        return result;
+                    }
+                }
+            }
+            None => {
+                let safe_len = safe_output_len(&buf[pos..]);
+                if safe_len > 0 {
+                    result.push(OutputChunk::Clean(buf[pos..pos + safe_len].to_vec()));
+                }
+                *buf = buf[pos + safe_len..].to_vec();
+                return result;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,165 +163,16 @@ fn strip_ansi(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Structured output parser
-// Converts claw's pipe-mode stdout into typed WebSocket frames:
-//   tool_start  { tool, command }
-//   tool_result { text }   — streamed stdout from the tool
-//   tool_end    { exit_code }
-//   assistant_text { text }
-//   chat_end
+// Structured text routing
+// When EDUCLAW_STRUCTURED_OUTPUT=1 claw suppresses spinner/box-drawing output
+// and emits OSC 99 envelopes for every typed event.  Non-OSC bytes while a
+// chat turn is active are forwarded as assistant_text; only the bare REPL
+// prompt needs to be filtered.
 // ---------------------------------------------------------------------------
 
-/// Parser state for one user turn.
-#[derive(Default)]
-enum ParseState {
-    #[default]
-    Idle,
-    /// Inside ╭─ tool ─╮ header box, accumulating command lines.
-    InHeader { tool: String, cmds: Vec<String> },
-    /// After ╰──╯, waiting for the ✓ / ✗ status line.
-    AfterClose { tool: String, command: String },    /// Collecting tool stdout lines (after ✓/✗ status until next tool or Done).
-    InOutput { tool: String, command: String, exit_code: i32 },}
-
-/// "╭─ bash ─╮" → Some("bash"), otherwise None.
-fn parse_tool_header_start(line: &str) -> Option<String> {
-    let s = line.trim();
-    let rest = s.strip_prefix("╭─ ")?;
-    let tool = rest.strip_suffix(" ─╮")?.trim();
-    if tool.is_empty() { return None; }
-    Some(tool.to_string())
-}
-
-/// "✓ bash exit_code:127" / "✗ bash" → Some(exit_code), None otherwise.
-fn parse_tool_status(line: &str) -> Option<i32> {
-    let s = line.trim();
-    let (is_ok, rest) = if let Some(r) = s.strip_prefix('✓') {
-        (true, r.trim())
-    } else if let Some(r) = s.strip_prefix('✗') {
-        (false, r.trim())
-    } else {
-        return None;
-    };
-    if let Some(pos) = rest.find("exit_code:") {
-        let digits: String = rest[pos + "exit_code:".len()..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        Some(digits.parse().unwrap_or(if is_ok { 0 } else { 1 }))
-    } else {
-        Some(if is_ok { 0 } else { 1 })
-    }
-}
-
-/// True for spinner / REPL-prompt noise lines that should be dropped.
+/// Drop the bare REPL prompt that claw writes after every turn.
 fn is_noise_line(line: &str) -> bool {
-    let s = line
-        .trim_start_matches(|c: char| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✔ ".contains(c))
-        .trim();
-    s.contains("🦀 Thinking")
-        || s.starts_with("claw v")
-        || line.trim() == ">"
-        || line.trim() == "> "
-}
-
-/// Process one complete line via the state machine.
-/// Returns (vec_of_json_strings, turn_is_complete).
-fn process_chat_line(state: &mut ParseState, raw: &str) -> (Vec<String>, bool) {
-    let line = raw.trim_end_matches('\r');
-    let mut msgs: Vec<String> = Vec::new();
-
-    // ✨ Done anywhere in the line — turn complete.
-    if line.contains('\u{2728}') && line.contains("Done") {
-        // Close any currently-open tool before signalling chat_end.
-        if let ParseState::InOutput { exit_code, .. } = state {
-            let code = *exit_code;
-            msgs.push(
-                serde_json::json!({ "type": "tool_end", "exit_code": code }).to_string(),
-            );
-        }
-        if let Some((before, _)) = line.split_once('\u{2728}') {
-            let text = before.trim_end_matches(|c: char| "✔ ".contains(c));
-            if !text.trim().is_empty() {
-                msgs.push(
-                    serde_json::json!({ "type": "assistant_text", "text": format!("{text}\n") })
-                        .to_string(),
-                );
-            }
-        }
-        msgs.push(r#"{"type":"chat_end"}"#.to_string());
-        *state = ParseState::Idle;
-        return (msgs, true);
-    }
-
-    if is_noise_line(line) {
-        return (msgs, false);
-    }
-
-    match state {
-        ParseState::Idle => {
-            if let Some(tool) = parse_tool_header_start(line) {
-                *state = ParseState::InHeader { tool, cmds: Vec::new() };
-            } else {
-                msgs.push(
-                    serde_json::json!({ "type": "assistant_text", "text": format!("{line}\n") })
-                        .to_string(),
-                );
-            }
-        }
-        ParseState::InHeader { tool, cmds } => {
-            if line.trim_start().starts_with('╰') {
-                let tool_name = tool.clone();
-                let command = cmds
-                    .iter()
-                    .map(|s| s.trim_start_matches(|c: char| c == '$' || c == ' '))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                *state = ParseState::AfterClose { tool: tool_name, command };
-            } else if let Some(body) = line.split_once('│') {
-                cmds.push(body.1.trim_start().to_string());
-            }
-        }
-        ParseState::AfterClose { tool, command } => {
-            if line.trim().is_empty() {
-                return (msgs, false);
-            }
-            let tool_name = tool.clone();
-            let cmd = command.clone();
-            if let Some(code) = parse_tool_status(line) {
-                // Status line: emit tool_start now, collect stdout in InOutput.
-                msgs.push(
-                    serde_json::json!({ "type": "tool_start", "tool": tool_name.clone(), "command": cmd.clone() })
-                        .to_string(),
-                );
-                *state = ParseState::InOutput { tool: tool_name, command: cmd, exit_code: code };
-            } else {
-                // Not a status line — treat as assistant text, reset to Idle.
-                *state = ParseState::Idle;
-                msgs.push(
-                    serde_json::json!({ "type": "assistant_text", "text": format!("{line}\n") })
-                        .to_string(),
-                );
-            }
-        }
-        ParseState::InOutput { exit_code, .. } => {
-            // A new tool header closes the current tool.
-            if let Some(new_tool) = parse_tool_header_start(line) {
-                let code = *exit_code;
-                msgs.push(
-                    serde_json::json!({ "type": "tool_end", "exit_code": code }).to_string(),
-                );
-                *state = ParseState::InHeader { tool: new_tool, cmds: Vec::new() };
-            } else if !line.trim().is_empty() {
-                // Stream tool stdout line to the frontend.
-                msgs.push(
-                    serde_json::json!({ "type": "tool_result", "text": format!("{line}\n") })
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    (msgs, false)
+    line.trim() == ">" || line.trim() == "> "
 }
 
 /// Map an image file extension to a MIME type for the data-URL.
@@ -335,6 +198,7 @@ fn mime_for_image(path: &Path) -> &'static str {
 enum ClientMessage {
     Input { data: String },
     Resize { cols: u16, rows: u16 },
+    Cancel,
 }
 
 /// Spawn `claw` with piped stdio and bridge its I/O to the WebSocket.
@@ -351,6 +215,13 @@ pub async fn run_pty_session(
     mut broker_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
     use std::process::Stdio;
+
+    // When claw is running in structured OSC mode every assistant token is
+    // already delivered as a typed envelope; the Clean-bytes fallback path
+    // must NOT also emit assistant_text or each token appears twice.
+    let structured_mode = env_vars
+        .iter()
+        .any(|(k, v)| k == "EDUCLAW_STRUCTURED_OUTPUT" && v == "1");
 
     let mut cmd = tokio::process::Command::new(&claw_bin);
     cmd.arg("--dangerously-skip-permissions");
@@ -380,6 +251,9 @@ pub async fn run_pty_session(
     let mut child = cmd
         .spawn()
         .map_err(|e| AppError::Session(format!("failed to spawn claw: {e}")))?;
+
+    // Capture PID before taking stdio handles — used by the Cancel handler.
+    let child_pid: Option<u32> = child.id();
 
     let child_stdin = child.stdin.take().expect("stdin piped");
     let child_stdout = child.stdout.take().expect("stdout piped");
@@ -417,16 +291,17 @@ pub async fn run_pty_session(
         let mut reader = tokio::io::BufReader::new(child_stdout);
         let mut raw_buf = [0u8; 4096];
         let mut osc_buf: Vec<u8> = Vec::new();
-        // Line buffer + state machine for structured chat output.
-        let mut line_buf = String::new();
-        let mut parse_state = ParseState::Idle;
+        // True between tool_start and tool_end OSC envelopes; suppresses
+        // non-OSC stdout from being forwarded as assistant_text so that
+        // raw tool output (ls listings, file contents, etc.) only appears
+        // in the terminal panel, not the chat panel.
+        let mut inside_tool = false;
 
         'outer: loop {
             tokio::select! {
                 // Forward chat_start; reset parser so each new turn starts clean.
                 Some(ctrl_msg) = ctrl_rx.recv() => {
-                    parse_state = ParseState::Idle;
-                    line_buf.clear();
+                    inside_tool = false;
                     if ws_sender.send(Message::Text(ctrl_msg)).await.is_err() {
                         break 'outer;
                     }
@@ -439,98 +314,117 @@ pub async fn run_pty_session(
                         Ok(n) => n,
                     };
 
-                    let (clean, envelopes) = split_output(&raw_buf[..n], &mut osc_buf);
+                    let chunks = split_output_ordered(&raw_buf[..n], &mut osc_buf);
 
-                    // Always forward raw bytes to xterm.js (terminal panel).
-                    if !clean.is_empty()
-                        && ws_sender
-                            .send(Message::Binary(clean.clone().into()))
-                            .await
-                            .is_err()
-                    {
-                        break 'outer;
-                    }
-
-                    // Structured chat routing: parse line-by-line into typed WS frames.
-                    if chat_active_out.load(Ordering::Relaxed) && !clean.is_empty() {
-                        let raw_str = String::from_utf8_lossy(&clean).into_owned();
-                        line_buf.push_str(&strip_ansi(&raw_str));
-
-                        let mut turn_done = false;
-                        while let Some(nl) = line_buf.find('\n') {
-                            let line = line_buf[..nl].to_string();
-                            line_buf.drain(..=nl);
-                            let (out_msgs, done) =
-                                process_chat_line(&mut parse_state, &line);
-                            for json in out_msgs {
-                                if ws_sender.send(Message::Text(json)).await.is_err() {
+                    for chunk in chunks {
+                        match chunk {
+                            OutputChunk::Clean(ref bytes) => {
+                                // Always forward raw bytes to xterm.js.
+                                if ws_sender
+                                    .send(Message::Binary(bytes.clone().into()))
+                                    .await
+                                    .is_err()
+                                {
                                     break 'outer;
                                 }
-                            }
-                            if done {
-                                turn_done = true;
-                                chat_active_out.store(false, Ordering::Relaxed);
-                                break;
-                            }
-                        }
-                        // Fallback: bare REPL prompt (">") arrives without a newline.
-                        if !turn_done
-                            && chat_active_out.load(Ordering::Relaxed)
-                            && line_buf.trim() == ">"
-                        {
-                            line_buf.clear();
-                            chat_active_out.store(false, Ordering::Relaxed);
-                            if ws_sender
-                                .send(Message::Text(r#"{"type":"chat_end"}"#.to_string()))
-                                .await
-                                .is_err()
-                            {
-                                break 'outer;
-                            }
-                        }
-                    }
 
-                    // Forward any OSC envelopes (show_image, etc.).
-                    for env in envelopes {
-                        let json_msg = if env
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            == Some("show_image")
-                        {
-                            let path_str = match env
-                                .get("payload")
-                                .and_then(|p| p.get("path"))
-                                .and_then(|p| p.as_str())
-                            {
-                                Some(s) => s.to_owned(),
-                                None => continue,
-                            };
-                            let img_path = if Path::new(&path_str).is_absolute() {
-                                PathBuf::from(&path_str)
-                            } else {
-                                osc_workspace.join(&path_str)
-                            };
-                            match tokio::fs::read(&img_path).await {
-                                Ok(bytes) => serde_json::json!({
-                                    "type": "show_image",
-                                    "payload": {
-                                        "path": path_str,
-                                        "data_url": format!(
-                                            "data:{};base64,{}",
-                                            mime_for_image(&img_path),
-                                            STANDARD.encode(&bytes)
-                                        )
+                                // Forward as assistant_text only in non-structured mode
+                                // (fallback for plain bytes) AND when chat is active
+                                // AND we are NOT inside a tool execution.
+                                // In structured mode every token arrives as an OSC
+                                // assistant_text envelope — forwarding raw bytes too
+                                // would cause every token to appear twice in the chat.
+                                if !structured_mode && chat_active_out.load(Ordering::Relaxed) && !inside_tool {
+                                    let raw_str = String::from_utf8_lossy(bytes);
+                                    let text: String = strip_ansi(&raw_str)
+                                        .lines()
+                                        .filter(|l| !is_noise_line(l))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    let text = text.trim_end_matches('\n').to_string();
+                                    if !text.trim().is_empty() {
+                                        let frame = serde_json::json!({
+                                            "type": "assistant_text",
+                                            "text": format!("{text}\n")
+                                        });
+                                        if ws_sender
+                                            .send(Message::Text(frame.to_string()))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break 'outer;
+                                        }
                                     }
-                                }),
-                                Err(_) => continue,
+                                }
                             }
-                        } else {
-                            env
-                        };
 
-                        if let Ok(text) = serde_json::to_string(&json_msg) {
-                            if ws_sender.send(Message::Text(text)).await.is_err() {
-                                break 'outer;
+                            OutputChunk::Envelope(env) => {
+                                // Dispatch typed WS frames; update inside_tool state.
+                                let json_msg: Option<serde_json::Value> = match env
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                {
+                                    Some("thinking") => {
+                                        Some(serde_json::json!({ "type": "thinking" }))
+                                    }
+                                    Some("tool_start") => {
+                                        inside_tool = true;
+                                        Some(env)
+                                    }
+                                    Some("tool_end") => {
+                                        inside_tool = false;
+                                        Some(env)
+                                    }
+                                    Some("assistant_text") => Some(env),
+                                    Some("chat_end") => {
+                                        chat_active_out.store(false, Ordering::Relaxed);
+                                        inside_tool = false;
+                                        Some(serde_json::json!({ "type": "chat_end" }))
+                                    }
+                                    Some("chat_error") => {
+                                        chat_active_out.store(false, Ordering::Relaxed);
+                                        inside_tool = false;
+                                        Some(env)
+                                    }
+                                    Some("show_image") => {
+                                        let path_str = match env
+                                            .get("payload")
+                                            .and_then(|p| p.get("path"))
+                                            .and_then(|p| p.as_str())
+                                        {
+                                            Some(s) => s.to_owned(),
+                                            None => { continue; }
+                                        };
+                                        let img_path = if Path::new(&path_str).is_absolute() {
+                                            PathBuf::from(&path_str)
+                                        } else {
+                                            osc_workspace.join(&path_str)
+                                        };
+                                        match tokio::fs::read(&img_path).await {
+                                            Ok(img_bytes) => Some(serde_json::json!({
+                                                "type": "show_image",
+                                                "payload": {
+                                                    "path": path_str,
+                                                    "data_url": format!(
+                                                        "data:{};base64,{}",
+                                                        mime_for_image(&img_path),
+                                                        STANDARD.encode(&img_bytes)
+                                                    )
+                                                }
+                                            })),
+                                            Err(_) => None,
+                                        }
+                                    }
+                                    _ => None,
+                                };
+
+                                if let Some(msg) = json_msg {
+                                    if let Ok(text) = serde_json::to_string(&msg) {
+                                        if ws_sender.send(Message::Text(text)).await.is_err() {
+                                            break 'outer;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -568,6 +462,18 @@ pub async fn run_pty_session(
                         }
                         ClientMessage::Resize { .. } => {
                             // No PTY: resize messages are silently ignored.
+                        }
+                        ClientMessage::Cancel => {
+                            // Send SIGINT to the claw process.  The ctrl_c()
+                            // handler inside claw calls abort_signal.abort()
+                            // and sets the educlaw_cancel_flag, which stops
+                            // the active HTTP stream on the next event.
+                            if let Some(pid) = child_pid {
+                                let _ = tokio::process::Command::new("kill")
+                                    .args(["-s", "INT", &pid.to_string()])
+                                    .status()
+                                    .await;
+                            }
                         }
                     }
                 }

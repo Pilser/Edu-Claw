@@ -90,6 +90,10 @@ async fn session_ws(
             }
         }
 
+        // Enable OSC-based structured output so pty_bridge can dispatch
+        // typed frames without regex parsing.
+        env_vars.push(("EDUCLAW_STRUCTURED_OUTPUT".to_string(), "1".to_string()));
+
         // Use CLAW_MODEL env var as default model; overridable per-session in the future.
         let model = std::env::var("CLAW_MODEL").ok();
 

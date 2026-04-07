@@ -10,13 +10,12 @@ interface Options {
   onImage: (p: ShowImagePayload) => void
   onChatStart?: () => void
   onToolStart?: (tool: string, command: string) => void
-  onToolResult?: (text: string) => void
-  onToolEnd?: (exitCode: number) => void
+  onToolEnd?: (exitCode: number, stdout: string, stderr: string) => void
   onAssistantText?: (text: string) => void
   onChatEnd?: () => void
 }
 
-export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart, onToolStart, onToolResult, onToolEnd, onAssistantText, onChatEnd }: Options) {
+export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart, onToolStart, onToolEnd, onAssistantText, onChatEnd }: Options) {
   const [status, setStatus] = useState<WsStatus>('connecting')
   const wsRef = useRef<WebSocket | null>(null)
   const keepaliveRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -32,6 +31,10 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart
 
   const sendResize = useCallback((cols: number, rows: number) => {
     send({ type: 'resize', cols, rows })
+  }, [send])
+
+  const sendCancel = useCallback(() => {
+    send({ type: 'cancel' })
   }, [send])
 
   useEffect(() => {
@@ -82,12 +85,13 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart
             case 'tool_start':
               onToolStart?.(frame.tool ?? '', frame.command ?? '')
               break
-            case 'tool_result':
-              if (frame.text) onToolResult?.(frame.text)
+            case 'tool_end': {
+              const code = typeof frame.exit_code === 'number' ? frame.exit_code : 0
+              const stdout = (frame as any).stdout ?? ''
+              const stderr = (frame as any).stderr ?? ''
+              onToolEnd?.(code, stdout, stderr)
               break
-            case 'tool_end':
-              onToolEnd?.(typeof frame.exit_code === 'number' ? frame.exit_code : 0)
-              break
+            }
             case 'assistant_text':
               if (frame.text) onAssistantText?.(frame.text)
               break
@@ -112,7 +116,7 @@ export function useWebSocket({ sessionId, token, onPtyData, onImage, onChatStart
       ws.close()
       if (keepaliveRef.current) clearInterval(keepaliveRef.current)
     }
-  }, [sessionId, token, onPtyData, onImage, onChatStart, onToolStart, onToolResult, onToolEnd, onAssistantText, onChatEnd])
+  }, [sessionId, token, onPtyData, onImage, onChatStart, onToolStart, onToolEnd, onAssistantText, onChatEnd])
 
-  return { status, sendInput, sendResize }
+  return { status, sendInput, sendResize, sendCancel }
 }
