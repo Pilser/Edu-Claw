@@ -173,7 +173,7 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
         </div>
 
         <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">
-          {auth.subject_ids[0] ?? 'open'}
+          {auth.cohort_id || 'no cohort'}
         </span>
 
         <StatusDot status={status} />
@@ -226,7 +226,7 @@ export default function SessionPage({ auth, session, onEnd }: Props) {
               <FileTree
                 token={session.token}
                 sessionId={session.session_id}
-                subjectId={auth.subject_ids[0] ?? ''}
+                subjectIds={auth.subject_ids}
                 onFileSelect={(_path, name) => { console.info('file selected:', name) }}
               />
             </div>

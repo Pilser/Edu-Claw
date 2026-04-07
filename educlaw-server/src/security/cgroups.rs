@@ -29,7 +29,10 @@ pub async fn setup_session_cgroup(session_id: &str, pid: u32) {
     let cg = session_cgroup(session_id);
 
     if let Err(e) = tokio::fs::create_dir_all(&cg).await {
-        warn!(session_id, %e, "cgroup: failed to create dir (cgroups v2 available?)");
+        // cgroups v2 delegation requires CAP_SYS_ADMIN or a pre-delegated
+        // /sys/fs/cgroup/educlaw/ dir owned by the server user.
+        // This is best-effort — log at debug so it doesn't pollute normal runs.
+        tracing::debug!(session_id, %e, "cgroup: skipping (no write permission — pre-create /sys/fs/cgroup/educlaw/ or run with CAP_SYS_ADMIN)");
         return;
     }
 

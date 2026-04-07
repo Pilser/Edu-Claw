@@ -39,7 +39,7 @@ impl SessionDirs {
     ///   (e.g. `/var/lib/educlaw/sessions`)
     /// * `session_id`     — unique session UUID
     /// * `lower`          — cohort content dir (must already exist)
-    ///   (e.g. `/data/classes/{cohort_id}`)
+    ///   (e.g. `/data/subjects/{cohort_id}`)
     /// * `upper`          — student persistent dir (created on first session)
     ///   (e.g. `/data/students/{student_id}`)
     pub fn new(

@@ -5,7 +5,8 @@ import type { FileNode } from '../api/types'
 interface Props {
   token: string
   sessionId: string
-  subjectId: string
+  /** All subject slugs for the student's cohort */
+  subjectIds: string[]
   onFileSelect: (path: string, name: string) => void
 }
 
@@ -65,7 +66,7 @@ function FileRow({
   )
 }
 
-export default function FileTree({ token, sessionId, subjectId, onFileSelect }: Props) {
+export default function FileTree({ token, sessionId, subjectIds, onFileSelect }: Props) {
   const [tab, setTab]       = useState<Tab>('subject')
   const [files, setFiles]   = useState<FileNode[]>([])
   const [loading, setLoading] = useState(false)
@@ -74,15 +75,36 @@ export default function FileTree({ token, sessionId, subjectId, onFileSelect }: 
   useEffect(() => {
     setError('')
     setLoading(true)
-    const req = tab === 'subject'
-      ? api.listSubjectFiles(subjectId, token)
-      : api.listStudentFiles(sessionId, token)
 
-    req
-      .then(setFiles)
-      .catch(e => setError(e instanceof Error ? e.message : 'Failed to load files'))
-      .finally(() => setLoading(false))
-  }, [tab, token, subjectId, sessionId])
+    if (tab === 'subject') {
+      // Fetch each subject in parallel, then wrap each result as a
+      // top-level folder node named after the subject slug.
+      if (subjectIds.length === 0) {
+        setFiles([])
+        setLoading(false)
+        return
+      }
+      Promise.all(
+        subjectIds.map(slug =>
+          api.listSubjectFiles(slug, token).then(children => ({
+            name: slug,
+            path: slug,
+            kind: 'dir' as const,
+            children,
+          } satisfies FileNode))
+        )
+      )
+        .then(setFiles)
+        .catch(e => setError(e instanceof Error ? e.message : 'Failed to load subjects'))
+        .finally(() => setLoading(false))
+    } else {
+      // My Files — student's persistent upper layer (hidden dirs already excluded server-side)
+      api.listStudentFiles(sessionId, token)
+        .then(setFiles)
+        .catch(e => setError(e instanceof Error ? e.message : 'Failed to load files'))
+        .finally(() => setLoading(false))
+    }
+  }, [tab, token, subjectIds, sessionId])
 
   return (
     <div className="flex flex-col h-full">

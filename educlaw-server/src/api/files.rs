@@ -40,13 +40,13 @@ use super::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         // Subject materials
-        .route("/files/subject/{subject_id}/tree", get(list_subject_files))
-        .route("/files/subject/{subject_id}/read", get(read_subject_file))
+        .route("/files/subject/:subject_id/tree", get(list_subject_files))
+        .route("/files/subject/:subject_id/read", get(read_subject_file))
         // Student workspace
-        .route("/files/student/{session_id}/tree",   get(list_student))
-        .route("/files/student/{session_id}/read",   get(read_student_file))
-        .route("/files/student/{session_id}/write",  put(write_student_file))
-        .route("/files/student/{session_id}/delete", delete(delete_student_file))
+        .route("/files/student/:session_id/tree",   get(list_student))
+        .route("/files/student/:session_id/read",   get(read_student_file))
+        .route("/files/student/:session_id/write",  put(write_student_file))
+        .route("/files/student/:session_id/delete", delete(delete_student_file))
 }
 
 // ── Shared types ──────────────────────────────────────────────────────────
@@ -261,7 +261,20 @@ async fn list_student(
         return Ok(Json(vec![]));
     }
 
-    Ok(Json(build_tree(&upper, "")))
+    // OverlayFS copy-up: when the agent reads or stats a subject directory,
+    // the kernel can create an empty stub of that dir inside `upper`.
+    // Filter those stubs out so "My Files" only shows student-owned content.
+    // The subject slugs are already in the JWT — no extra DB call needed.
+    let subject_slugs: std::collections::HashSet<&str> =
+        claims.subject_ids.iter().map(|s| s.as_str()).collect();
+
+    let tree = build_tree(&upper, "");
+    let filtered = tree
+        .into_iter()
+        .filter(|node| !(node.kind == "dir" && subject_slugs.contains(node.name.as_str())))
+        .collect();
+
+    Ok(Json(filtered))
 }
 
 async fn read_student_file(
